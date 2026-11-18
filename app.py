@@ -5,14 +5,17 @@ import time
 
 import streamlit as st
 
-from agent.agent import Agent
+from agent.agent import Agent, TurnResult
+from agent.headlines import answer_headline, compose
 from scoring.common import window_label
 from scoring.config import WINDOW
 from agent.prompts import PROMPT_VERSION
 from ui import setup
 from ui.cache import cache_key
-from ui.progress import StatusReporter
-from ui.render import EXAMPLES, about_markdown, render_assistant
+from ui.progress import StatusReporter, done_line
+from ui.render import (
+    EXAMPLE_CALLS, EXAMPLES, about_markdown, render_assistant, render_checks, render_details, render_followups,
+)
 
 st.set_page_config(page_title="Airport Investment Intelligence", page_icon="✈️", layout="wide")
 
@@ -27,9 +30,10 @@ with st.expander("About this agent", expanded=False):
     st.markdown(about_markdown(frames))
 
 
-def ask_later(question: str) -> None:
-    """Button callback: queue a question (runs before the rerun, so the page redraws with it already queued)."""
-    st.session_state.pending = question
+def ask_later(question: str, tool: str | None = None, args: dict | None = None) -> None:
+    """Button callback: queue a question (runs before the rerun, so the page redraws with it already queued).
+    With a known tool + arguments (example cards, suggested follow-ups) the answer takes the fast path."""
+    st.session_state.pending = {"text": question, "tool": tool, "args": args or {}}
 
 
 def new_conversation() -> None:
@@ -57,7 +61,8 @@ with st.sidebar:
     if not empty_state:
         st.subheader("Example questions")
         for i, q in enumerate(EXAMPLES):
-            st.button(q, key=f"example_{i}", width="stretch", disabled=not api_key, on_click=ask_later, args=(q,))
+            st.button(q, key=f"example_{i}", width="stretch", disabled=not api_key, on_click=ask_later,
+                      args=(q, *EXAMPLE_CALLS[i]))
     st.button("New conversation", key="new_conversation", type="primary", width="stretch",
               on_click=new_conversation)
 
@@ -85,7 +90,7 @@ with st.sidebar:
         if st.session_state.get("voice_text"):
             edited = st.text_area("Transcript (check airport codes, then send)", key="voice_text", height=90)
             if st.button("Send", key="voice_send", width="stretch"):
-                st.session_state.pending = edited.strip()
+                st.session_state.pending = {"text": edited.strip()}
 
     st.divider()
     st.caption("**Model:** " + (setup.model_info(st.session_state.agent.client)
@@ -97,9 +102,10 @@ with st.sidebar:
 # ---------------------------------------------------------------- setup notice
 if not api_key:
     st.info("**Setup needed: no LLM API key found.**\n\n"
-            "1. Create a free API key at your LLM provider (default: Groq, console.groq.com).\n"
-            "2. Copy `.env.example` to `.env` and set `LLM_API_KEY=...` "
-            "(or add `LLM_API_KEY` to Streamlit secrets when deployed).\n"
+            "1. Create free API keys: Google AI Studio (aistudio.google.com, primary) and/or Groq "
+            "(console.groq.com, fallback).\n"
+            "2. Copy `.env.example` to `.env` and set `GEMINI_API_KEY=...` and/or `LLM_API_KEY=...` "
+            "(or add them to Streamlit secrets when deployed).\n"
             "3. Restart the app: `streamlit run app.py`.\n\n"
             "The data and methodology above are available without a key.")
 
@@ -113,7 +119,8 @@ if empty_state:
     for i, (title, q) in enumerate(zip(EXAMPLE_TITLES, EXAMPLES)):
         with cols[i % 2].container(border=True):
             st.markdown(f"**{title}**")
-            st.button(q, key=f"card_{i}", type="tertiary", disabled=not api_key, on_click=ask_later, args=(q,))
+            st.button(q, key=f"card_{i}", type="tertiary", disabled=not api_key, on_click=ask_later,
+                      args=(q, *EXAMPLE_CALLS[i]))
 
 # ---------------------------------------------------------------- history
 for idx, message in enumerate(st.session_state.messages):
@@ -126,18 +133,75 @@ for idx, message in enumerate(st.session_state.messages):
 # ---------------------------------------------------------------- new question
 typed = st.chat_input("Ask about US airport demand, congestion or expansion candidates",
                       disabled=not api_key, key="chat_input")
-question = typed or st.session_state.pending
+request = {"text": typed} if typed else st.session_state.pending
 st.session_state.pending = None
 
-def done_line(result, seconds: float, primary: str) -> str:
-    """'Done · 1 tool call · 2,682 tokens · 3s · gpt-oss-20b (fallback)': shown once, in the status label."""
-    n = len(result.tool_calls)
-    names = [m.split("/")[-1] + (" (fallback)" if m != primary else "") for m in result.models]
-    return (f"Done · {n} tool call{'s' if n != 1 else ''} · {result.total_tokens:,} tokens · {seconds:.0f}s"
-            + (f" · {' + '.join(names)}" if names else ""))
+RATE_LIMITED_NOTE = "The LLM provider is temporarily at capacity. Please try again in about a minute."
 
 
-if question and api_key:
+def error_note(result: TurnResult) -> str:
+    return RATE_LIMITED_NOTE if result.error == "rate_limited" else result.explanation
+
+
+def message_from(result: TurnResult, meta: str) -> dict:
+    text = compose(result.headline, error_note(result), why_heading=False) if result.error else result.text
+    return {"role": "assistant", "text": text, "records": result.tool_calls,
+            "untraceable": result.untraceable_numbers, "meta": meta, "error": result.error,
+            "grounding_issues": result.grounding_issues, "retried": result.retried}
+
+
+def answer_with_agent(agent: Agent, question: str, primary: str) -> dict:
+    """Typed or spoken question: the LLM chooses the tool(s), then explains."""
+    started = time.monotonic()
+    with st.status("Analyzing question...", expanded=False) as status:
+        reporter = StatusReporter(status)
+        if hasattr(agent.client, "set_sleep"):
+            agent.client.set_sleep(reporter.sleep)
+        result = agent.ask(question, on_event=reporter.on_event)
+        done = done_line(result, time.monotonic() - started, primary)
+        status.update(label=done if not result.error else "Stopped",
+                      state="error" if result.error else "complete", expanded=False)
+    message = message_from(result, done)
+    st.session_state.messages.append(message)
+    render_assistant(message, show_meta=False,     # the status label above already shows "Done"
+                     key=f"msg{len(st.session_state.messages) - 1}", on_followup=ask_later)
+    return message
+
+
+def answer_direct(agent: Agent, question: str, tool: str, args: dict, primary: str) -> dict:
+    """Example card or suggested follow-up: run the known tool now and show the computed Answer, Key facts and
+    Evidence at once; then one LLM call writes the Why / drivers bullets into the slot below the Answer."""
+    started = time.monotonic()
+    status = st.status("Running tool...", expanded=False)
+    reporter = StatusReporter(status)
+    if hasattr(agent.client, "set_sleep"):
+        agent.client.set_sleep(reporter.sleep)
+    turn = agent.start_direct(question, tool, args, on_event=reporter.on_event)
+    headline = answer_headline(turn.records)
+    if headline:
+        st.markdown(compose(headline, ""))
+    why = st.empty()
+    why.caption("Writing the explanation...")
+    render_details(turn.records)
+    result = agent.explain(turn, on_event=reporter.on_event)
+    done = done_line(result, time.monotonic() - started, primary)
+    status.update(label=done if not result.error else "Stopped",
+                  state="error" if result.error else "complete", expanded=False)
+    message = message_from(result, done)
+    st.session_state.messages.append(message)
+    with why.container():
+        if result.error:
+            st.markdown(error_note(result))
+        else:
+            st.markdown(("**Why / drivers**\n" if result.headline else "") + result.explanation)
+            render_checks(message)
+    if not result.error:
+        render_followups(result.tool_calls, key=f"msg{len(st.session_state.messages) - 1}", on_followup=ask_later)
+    return message
+
+
+if request and request.get("text") and api_key:
+    question = request["text"]
     agent: Agent = st.session_state.agent
     primary = getattr(agent.client, "model", "")
     first_question = not agent.turns
@@ -155,25 +219,10 @@ if question and api_key:
             st.session_state.messages.append(message)
             render_assistant(message, key=f"msg{len(st.session_state.messages) - 1}", on_followup=ask_later)
         else:
-            started = time.monotonic()
-            with st.status("Analyzing question...", expanded=False) as status:
-                reporter = StatusReporter(status)
-                if hasattr(agent.client, "set_sleep"):
-                    agent.client.set_sleep(reporter.sleep)
-                result = agent.ask(question, on_event=reporter.on_event)
-                done = done_line(result, time.monotonic() - started, primary)
-                status.update(label=done if not result.error else "Stopped",
-                              state="error" if result.error else "complete", expanded=False)
-            if result.error == "rate_limited":
-                text = "The LLM provider is temporarily at capacity. Please try again in about a minute."
+            if request.get("tool"):
+                message = answer_direct(agent, question, request["tool"], request.get("args") or {}, primary)
             else:
-                text = result.text           # includes the daily-capacity message when every model is exhausted
-            message = {"role": "assistant", "text": text, "records": result.tool_calls,
-                       "untraceable": result.untraceable_numbers, "meta": done, "error": result.error,
-                       "grounding_issues": result.grounding_issues, "retried": result.retried}
-            st.session_state.messages.append(message)
-            render_assistant(message, show_meta=False,     # the status label above already shows "Done"
-                             key=f"msg{len(st.session_state.messages) - 1}", on_followup=ask_later)
-            if (first_question and not result.error and not result.untraceable_numbers
-                    and not result.grounding_issues):
+                message = answer_with_agent(agent, question, primary)
+            if (first_question and not message["error"] and not message["untraceable"]
+                    and not message["grounding_issues"]):
                 setup.get_answer_cache().put(key, message, agent.turns[-1])

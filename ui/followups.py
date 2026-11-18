@@ -1,7 +1,10 @@
 """Suggested follow-up questions under each answer, chosen deterministically from the tool that was used.
 
-Pure functions: input = the tool-call records of one answer, output = 2-3 question strings.
+Pure functions: input = the tool-call records of one answer, output = 2-3 suggestions. Each suggestion carries
+the exact tool call that answers it, so a click runs the tool directly (fast path, no LLM tool choice).
 """
+
+from dataclasses import dataclass, field
 
 from agent.tools import ToolCallRecord
 from scoring.config import DEFAULT_LONG_HAUL_MI, INVESTMENT_WEIGHTS, LONG_HAUL_THRESHOLDS_MI
@@ -9,69 +12,97 @@ from scoring.config import DEFAULT_LONG_HAUL_MI, INVESTMENT_WEIGHTS, LONG_HAUL_T
 # Large hubs used to suggest "What about X?" (first one that is not the airport just shown).
 PEER_HUBS = ["SFO", "BOS", "LAX", "JFK", "ORD", "DEN", "ATL", "SEA"]
 MAX_SUGGESTIONS = 3
+GROWTH_HIGHER = 0.5       # partial override; merged with the defaults and renormalised (growth -> 40%)
+
+
+@dataclass(frozen=True)
+class Suggestion:
+    question: str
+    tool: str
+    args: dict = field(default_factory=dict, hash=False)
 
 
 def _peer(exclude: set[str]) -> str:
     return next(code for code in PEER_HUBS if code not in exclude)
 
 
-def _rank(record: ToolCallRecord) -> list[str]:
+def _profile(airport: str) -> Suggestion:
+    return Suggestion(f"Show the profile of {airport}", "get_airport_profile", {"airport": airport})
+
+
+def _unmet(airport: str, question: str | None = None) -> Suggestion:
+    return Suggestion(question or f"What is the unmet demand at {airport}?", "unmet_demand", {"airport": airport})
+
+
+def _compare(a: str, b: str) -> Suggestion:
+    return Suggestion(f"Compare {a} and {b} congestion levels", "compare_congestion", {"airports": [a, b]})
+
+
+def from_rank(record: ToolCallRecord) -> list[Suggestion]:
     ranking = record.envelope["data"]["ranking"]
-    out = []
-    weights = ranking["weights"]
-    if weights.get("growth", 0) <= INVESTMENT_WEIGHTS["growth"]:
-        out.append("Rank them again with growth weighted higher")
+    scope = {k: v for k, v in record.args.items() if k in ("region", "states", "airports")}
+    if ranking["weights"].get("growth", 0) <= INVESTMENT_WEIGHTS["growth"]:
+        out = [Suggestion("Rank them again with growth weighted higher", "rank_airports",
+                          {**scope, "weights": {"growth": GROWTH_HIGHER}})]
     else:
-        out.append("Rank them again with default weights")
+        out = [Suggestion("Rank them again with default weights", "rank_airports", scope)]
     if ranking["ranking"]:
         top = ranking["ranking"][0]["airport"]
-        out += [f"Show the profile of {top}", f"What is the unmet demand at {top}?"]
+        out += [_profile(top), _unmet(top)]
     return out
 
 
-def _compare(record: ToolCallRecord) -> list[str]:
+def from_compare(record: ToolCallRecord) -> list[Suggestion]:
     rows = record.envelope["data"]["congestion"]["airports"]
     ordered = sorted(rows, key=lambda r: r["congestion_index"])
     lower, higher = ordered[0]["airport"], ordered[-1]["airport"]
-    return [f"Why is {lower} lower?", f"What is the unmet demand at {higher}?", f"Show the profile of {lower}"]
+    codes = [r["airport"] for r in rows]
+    return [Suggestion(f"Why is {lower} lower?", "compare_congestion", {"airports": codes}),
+            _unmet(higher), _profile(lower)]
 
 
-def _unmet(record: ToolCallRecord) -> list[str]:
+def from_unmet(record: ToolCallRecord) -> list[Suggestion]:
     airport = record.envelope["data"]["unmet_demand"]["airport"]
-    return [f"What about {_peer({airport})}?", f"Show the profile of {airport}",
-            f"Compare {airport} and {_peer({airport})} congestion levels"]
+    peer = _peer({airport})
+    return [_unmet(peer, f"What about {peer}?"), _profile(airport), _compare(airport, peer)]
 
 
-def _long_haul(record: ToolCallRecord) -> list[str]:
+def from_long_haul(record: ToolCallRecord) -> list[Suggestion]:
     d = record.envelope["data"]
     other = min(LONG_HAUL_THRESHOLDS_MI) if d["default_threshold_mi"] == DEFAULT_LONG_HAUL_MI else DEFAULT_LONG_HAUL_MI
-    return [f"What if long-haul starts at {other:,} miles?", f"Show the profile of {d['airport']}"]
+    return [Suggestion(f"What if long-haul starts at {other:,} miles?", "long_haul_share",
+                       {"airport": d["airport"], "threshold_mi": other}),
+            _profile(d["airport"])]
 
 
-def _profile(record: ToolCallRecord) -> list[str]:
+def from_profile(record: ToolCallRecord) -> list[Suggestion]:
     airport = record.envelope["data"]["profile"]["airport"]
-    peer = _peer({airport})
-    return [f"What is the unmet demand at {airport}?", f"Compare {airport} and {peer} congestion levels",
-            f"Are there FAA delays at {airport} right now?"]
+    return [_unmet(airport), _compare(airport, _peer({airport})),
+            Suggestion(f"Are there FAA delays at {airport} right now?", "live_airport_status", {"airport": airport})]
 
 
-def _live(record: ToolCallRecord) -> list[str]:
+def from_live(record: ToolCallRecord) -> list[Suggestion]:
     airport = record.envelope["data"]["airport"]
-    return [f"Show the profile of {airport}", f"What is the unmet demand at {airport}?"]
+    return [_profile(airport), _unmet(airport)]
 
 
-RULES = {"rank_airports": _rank, "compare_congestion": _compare, "unmet_demand": _unmet,
-         "long_haul_share": _long_haul, "get_airport_profile": _profile, "live_airport_status": _live}
+RULES = {"rank_airports": from_rank, "compare_congestion": from_compare, "unmet_demand": from_unmet,
+         "long_haul_share": from_long_haul, "get_airport_profile": from_profile, "live_airport_status": from_live}
 
 
-def suggestions(records: list[ToolCallRecord]) -> list[str]:
-    """2-3 follow-up questions based on the last successful tool call (empty if none applies)."""
+def suggestions(records: list[ToolCallRecord]) -> list[Suggestion]:
+    """2-3 follow-ups based on the last successful tool call (empty if none applies)."""
     for record in reversed(records or []):
         rule = RULES.get(record.name)
         if record.error or rule is None:
             continue
         try:
-            return list(dict.fromkeys(rule(record)))[:MAX_SUGGESTIONS]
+            out, seen = [], set()
+            for s in rule(record):
+                if s.question not in seen:
+                    seen.add(s.question)
+                    out.append(s)
+            return out[:MAX_SUGGESTIONS]
         except (KeyError, TypeError, IndexError, StopIteration):
             return []
     return []

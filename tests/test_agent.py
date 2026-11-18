@@ -58,7 +58,8 @@ def test_tool_error_is_returned_to_llm_and_loop_recovers(frames):
 def test_max_rounds_forces_final_answer_without_tools(frames):
     fake = FakeLLM([call("long_haul_share", {"airport": "AAA"}, f"c{i}") for i in range(2)] + [text("final")])
     result = Agent(fake, frames, max_tool_rounds=2).ask("loop forever")
-    assert result.text == "final" and fake.tool_choices[-1] == "none"
+    assert result.explanation == "final" and fake.tool_choices[-1] == "none"
+    assert result.text.startswith("**Answer** - AAA AAA Intl: 23.08% of 156 passenger departures")
 
 
 def test_memory_follow_up_sees_previous_turn(frames):
@@ -69,7 +70,7 @@ def test_memory_follow_up_sees_previous_turn(frames):
     agent.ask("what about BBB?")
     second_turn_first_call = fake.seen[2]
     contents = [m.get("content") for m in second_turn_first_call]
-    assert "unmet demand at AAA?" in contents and "AAA answer" in contents
+    assert "unmet demand at AAA?" in contents and any(c and c.endswith("AAA answer") for c in contents)
     assert any(m["role"] == "tool" for m in second_turn_first_call)       # latest completed turn keeps tools
 
 

@@ -28,6 +28,16 @@ def tool_label(name: str, args: str | dict) -> str:
     return f"Running tool: {name}" + (f" ({'; '.join(parts)})" if parts else "")
 
 
+def done_line(result, seconds: float, primary: str) -> str:
+    """'Done · 1 tool call · 2,682 tokens · 3s · gemini-3.5-flash-lite + gpt-oss-120b (fallback: gemini server
+    error (HTTP 503))': shown once, in the status label. `result` is an agent TurnResult."""
+    n = len(result.tool_calls)
+    why = f": {result.fallback_reason}" if result.fallback_reason else ""
+    names = [m.split("/")[-1] + (f" (fallback{why})" if m != primary else "") for m in result.models]
+    return (f"Done · {n} tool call{'s' if n != 1 else ''} · {result.total_tokens:,} tokens · {seconds:.0f}s"
+            + (f" · {' + '.join(names)}" if names else ""))
+
+
 def wait_message(seconds_left: int) -> str:
     return f"Rate limit reached on the LLM provider - resuming in ~{seconds_left}s"
 

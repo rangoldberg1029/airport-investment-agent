@@ -45,18 +45,18 @@ Public sources     BTS (data.bts.gov SODA API / TranStats), FAA, OurAirports, FA
 
 ### Harness choice — free LLM via an OpenAI-compatible API + our own small tool loop
 Constraint: **zero cost**. No paid services anywhere in the project.
-- We use the `openai` Python package only as a generic client, pointed at a FREE provider via
-  `LLM_BASE_URL`. Default: **Groq free tier** (no credit card), model set by `LLM_MODEL`
-  (e.g. `openai/gpt-oss-120b` or `llama-3.3-70b-versatile`).
-- Same code works with Google AI Studio (Gemini, free tier, OpenAI-compatible endpoint) or a
-  local Ollama model — just change 3 env vars. Provider-agnostic = no vendor lock-in.
+- We use the `openai` Python package only as a generic client, pointed at FREE providers' OpenAI-compatible
+  endpoints. Primary: **Google AI Studio, `gemini-3.5-flash-lite`** (free tier, no card). Only fallback:
+  **Groq, `openai/gpt-oss-120b`** (free tier). See `agent/llm.py` and `docs/eval/model_comparison.md`.
+- Provider-agnostic = no vendor lock-in: any OpenAI-compatible endpoint works via env vars.
 - No LangChain/LangGraph: ~5 tools and one loop; a framework adds abstraction without value here.
 - Full transparency: every tool call is logged and shown in the UI; easy to explain in the interview.
 - Tradeoffs: free tiers have low rate limits (requests/tokens per minute) → keep tool outputs
   compact, keep the system prompt short, retry with backoff on HTTP 429, show a friendly
   message if the limit is hit. Open models are somewhat weaker than frontier models at tool
   choice → this is mitigated because all numbers come from deterministic tools anyway.
-- Env vars: `LLM_API_KEY`, `LLM_BASE_URL` (default `https://api.groq.com/openai/v1`), `LLM_MODEL`.
+- Env vars: `GEMINI_API_KEY`, `LLM_MODEL` (primary); `LLM_API_KEY`, `LLM_BASE_URL`
+  (default `https://api.groq.com/openai/v1`), `LLM_FALLBACK_MODEL` (fallback). See `.env.example`.
 
 ## Data sources (verify each in the data spike before building on it)
 | Source | Use | Access |
@@ -108,7 +108,7 @@ All computed per airport over a trailing 12-month window (state the window in ev
 ├── DESIGN.md
 ├── README.md
 ├── requirements.txt
-├── .env.example           # LLM_API_KEY=, LLM_BASE_URL=, LLM_MODEL=
+├── .env.example           # GEMINI_API_KEY=, LLM_MODEL=, LLM_API_KEY=, LLM_BASE_URL=, LLM_FALLBACK_MODEL=
 └── .gitignore             # .env, data/*.duckdb, __pycache__, .venv
 ```
 
@@ -188,10 +188,16 @@ One line of reasoning per decision. Values live in `scoring/config.py`; change t
   names, so the LLM restates rather than calculates.
 - **Memory = last 6 exchanges.** Older answers are truncated to 300 characters, and tool messages are kept only for
   the latest turn. This keeps follow-ups working within the token budget.
-- **`reasoning_effort=low`, `max_completion_tokens=1000`.** The low and medium efforts gave the same eval
-  quality, and low uses fewer tokens.
-- **TPM pacer (limit read from response headers) plus 429 retry capped at 30 s.** This avoids most 429s, and
-  the user waits a bounded time.
+- **Lowest reasoning level that works (Gemini `minimal`, Groq `low`), max 1,000 output tokens per call.**
+  Fewer hidden tokens, same eval quality.
+- **Pacing from the provider's rate-limit headers when sent (Groq; cached tokens don't count), else a local
+  per-minute window of tokens and requests (Gemini); 429 retry capped at 30 s.** Avoids most 429s; bounded waits.
+- **Deterministic Answer line + LLM "Why / drivers" bullets (max 4).** Code builds the core answer from the tool
+  output (`agent/headlines.py`), so rank order, names, which index is higher, shares and scores are always
+  correct; the number and grounding checks run on the LLM part.
+- **Fast path for example cards and suggested follow-ups.** The tool and its arguments are known: the tool
+  runs directly, Key facts and Evidence show in ~25-200 ms, then one LLM call writes the bullets. The call is
+  recorded in the conversation like an LLM-chosen one, so follow-ups keep their context.
 - **Number traceability check across all turns.** Every number in an answer must trace to a tool output
   (envelope or LLM view); follow-ups may cite earlier turns.
 - **Grounding check.** Airport codes must be grounded, the answer must not claim tools that were not called,
@@ -199,21 +205,22 @@ One line of reasoning per decision. Values live in `scoring/config.py`; change t
   `tool_choice="required"`. This fixed the invented re-rank answer.
 - **Follow-up context: the last tool call and its arguments are injected into the user message.** This lets
   "rank them again…" re-call the tool with the right region.
-- **Prompt rules frozen after the last fixes (`PROMPT_VERSION`).** Further tuning gave diminishing
-  returns; the remaining limits are mitigated in the UI.
+- **Prompt rules frozen (`PROMPT_VERSION`), except one sign rule for the bullets:** a component drives a
+  score UP only if its contribution is positive; never call negative growth a driver; use "raises X" /
+  "lowers X". Further tuning gave diminishing returns; the remaining limits are mitigated in the UI.
 
-### Models (Groq free tier: 8K tokens/min, 200K tokens/day per model)
-- **Default `openai/gpt-oss-120b`.** It scored 7/7 on the eval. After the guardrails it scored 5/5 on completed
-  turns; the rest of that run was blocked by the daily quota.
-- **Fallback `openai/gpt-oss-20b`.** It scored 7/7 with grounding passing. It is used when the primary would wait more
-  than 5 s, or after a primary 429.
-- **Daily quota (TPD) 429 → that model is exhausted for the session; all exhausted → a clear message.**
+### Models (details and numbers: `docs/eval/model_comparison.md`, final report: `docs/eval/eval_results.md`)
+- **Primary `gemini-3.5-flash-lite` (Google AI Studio free tier, thinking `minimal`).** ~30x Groq's per-minute
+  budget (no pacing waits) and keeps Groq's daily quota for the fallback. Latest stable Flash-Lite in the
+  models list. Final eval: 7/7 tool choice, 0 grounding failures, 0 untraceable numbers, ~7.5 s per typed turn.
+- **Only fallback `openai/gpt-oss-120b` on Groq.** Used on HTTP 429, 5xx, timeout (20 s) or connection error,
+  or when Gemini would wait > 5 s; one switch per turn, reason shown in the "Done" line. Added after a real
+  Gemini 503 failed an eval turn. gpt-oss-20b is no longer used.
+- **Daily quota 429 → that model is exhausted for the session; all exhausted → a clear message.**
   Key facts, Evidence and cached examples still work.
 - **Rejected: `llama-3.3-70b-versatile` (404 for this key) and `qwen/qwen3.8-27b` (malformed tool calls).**
-  Results are in `docs/eval/`.
-- **Known LLM limits:** direction misstatements, mislabelled assumptions, ranking order and airport names.
-  They are mitigated by deterministic Key facts and Evidence, ranking headlines and official names in tool
-  outputs.
+- **Known LLM limits:** direction wording and weak explanations in the bullets. The core answer can no longer
+  be wrong (computed Answer line); Key facts and Evidence are deterministic.
 
 ### UI
 - **Streamlit with Altair charts.** Key facts and Evidence are built from the tool outputs, not from the LLM
@@ -234,8 +241,8 @@ One line of reasoning per decision. Values live in `scoring/config.py`; change t
 ### Working rules
 - **No scripted edits (Python/PowerShell rewriting files); use the normal edit tool only, and
   `.gitattributes` sets `eol=lf`.** Scripted edits broke encoding and line endings.
-- **No real-LLM runs (eval_agent.py, chat_cli) unless explicitly asked; use the FakeLLM tests.** This protects
-  the 200K tokens/day quota per model.
+- **No real-LLM runs (eval_agent.py, measure_fast_path.py, chat_cli) unless explicitly asked; use the FakeLLM
+  tests.** This protects the free daily quotas.
 - **Never commit secrets (`.env`, `.streamlit/secrets.toml`), and never modify the user's `.env`.** The repo is
   public.
 - **Plan first ("PLAN ONLY"), implement after approval.** Before every commit, run `pytest -q`, then restart

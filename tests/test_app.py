@@ -30,7 +30,7 @@ class ScriptedLLM:
     def complete(self, messages, tools, tool_choice="auto"):
         self.round += 1
         ScriptedLLM.calls += 1
-        if messages[-1]["role"] == "user":
+        if messages[-1]["role"] == "user" and tool_choice != "none":
             return LLMResponse("", [ToolCall(f"c{self.round}", "rank_airports", '{"states": ["MA", "CT"]}')], 100)
         return LLMResponse(self.answer, [], 50)
 
@@ -84,7 +84,12 @@ def test_example_question_renders_answer_key_facts_and_evidence(app):
     assert not at.exception
     text = markdown_text(at)
     assert "Which airports in New England" in text and "AAA ranks first." in text
+    assert "**Answer** - Top " in text and "New England candidates" in text      # computed headline
+    assert "**Why / drivers**" in text
     assert "Key facts" in text and "investment score" in text
+    assert ScriptedLLM.calls == 1                                                # fast path: one LLM call
+    last = at.session_state.messages[-1]
+    assert last["records"][0].name == "rank_airports" and last["records"][0].args == {"region": "new england"}
     assert any(e.label.startswith("Evidence (1 tool call)") for e in at.expander)
     assert not at.warning
 
@@ -114,13 +119,14 @@ def test_first_question_cached_across_conversations(app):
     at = app()
     at.button(key="card_0").click().run()
     calls_after_first = ScriptedLLM.calls
-    assert calls_after_first == 2                                         # tool call + answer
+    assert calls_after_first == 1                                         # fast path: tool ran directly
+
     at.sidebar.button(key="new_conversation").click().run()
     at.button(key="card_0").click().run()                                 # empty state again: card
     assert not at.exception
     assert ScriptedLLM.calls == calls_after_first                         # served from cache: no LLM call
     last = at.session_state.messages[-1]
-    assert last["cached"] and last["text"] == "AAA ranks first." and last["meta"].startswith("Cached result")
+    assert last["cached"] and last["text"].endswith("AAA ranks first.") and last["meta"].startswith("Cached result")
     assert len(at.session_state.agent.turns) == 1                         # restored for follow-ups
 
 
@@ -128,7 +134,7 @@ def test_follow_up_is_not_cached(app):
     at = app()
     at.button(key="card_0").click().run()                                 # empty state: card
     at.sidebar.button(key="example_0").click().run()                      # same text, now a follow-up (sidebar)
-    assert ScriptedLLM.calls == 4 and not at.session_state.messages[-1].get("cached")
+    assert ScriptedLLM.calls == 2 and not at.session_state.messages[-1].get("cached")   # 1 per fast-path answer
 
 
 class InventingLLM:

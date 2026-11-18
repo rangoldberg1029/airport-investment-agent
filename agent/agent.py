@@ -9,6 +9,13 @@ Follow-up context: the last successful tool call (name + arguments) is added to 
 "rank them again", "what about X" or "why is X lower" reuse the same region / airport set.
 Grounding check: every answer is checked deterministically (agent/guardrails.grounding_issues). If it fails,
 the turn is retried once with tool_choice="required"; if it still fails, the issues are returned to the UI.
+
+Answer = deterministic headline + LLM explanation: the "Answer" line is built by code from the tool outputs
+(agent/headlines.py); the LLM writes only the "Why / drivers" bullets. The number and grounding checks run on
+the LLM part.
+Direct path (example cards, suggested follow-ups): the tool and its arguments are known, so the tool runs first
+(start_direct) and a single LLM call writes the explanation (explain). The tool call is recorded in the
+conversation exactly like one the LLM chose.
 """
 
 import copy
@@ -17,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from agent.guardrails import grounding_issues, untraceable_numbers
+from agent.headlines import answer_headline, compose, why_bullets
 from agent.llm import LLMClient, QuotaExhausted, RateLimited
 from agent.prompts import SYSTEM_PROMPT
 from agent.tools import TOOL_SCHEMAS, TOOLS, ToolCallRecord, execute_tool
@@ -47,6 +55,13 @@ class TurnResult:
     models: list[str] = field(default_factory=list)      # models that answered, in order (primary/fallback)
     grounding_issues: list[str] = field(default_factory=list)   # non-empty = answer failed the grounding check
     retried: bool = False                                 # True = first draft failed the check, turn was retried
+    headline: str = ""          # deterministic Answer line (from tool outputs); empty if no tool succeeded
+    explanation: str = ""       # the LLM's part (Why / drivers bullets, or its whole answer if no headline)
+    fallback_reason: str | None = None   # why this turn switched to the fallback model (None = it did not)
+
+
+def _noop(event: str, **kw) -> None:
+    pass
 
 
 class Agent:
@@ -101,28 +116,77 @@ class Agent:
     def ask(self, text: str, on_event: Callable[..., None] | None = None) -> TurnResult:
         """Answer one user message. `on_event(event, **details)` reports progress to a UI:
         llm_call(round, after_tools), tool_start(name, args), tool_done(name, error), retry(issues)."""
-        emit = on_event or (lambda event, **kw: None)
+        emit = on_event or _noop
+        self._start_turn()
         context = self.followup_context()
-        turn, result = self._attempt(text, context, emit, force_tool=False)
+        turn, result = self._attempt(Turn(user=text, note=context), emit, first_choice="auto")
         if result.grounding_issues and not result.error:
             emit("retry", issues=result.grounding_issues)
             note = (context + "\n" if context else "") + (
                 "[Your previous draft was rejected by an automatic check: " + "; ".join(result.grounding_issues)
                 + ". Call the appropriate tool now and answer only from its output.]")
             first = result
-            turn, result = self._attempt(text, note, emit, force_tool=True)
-            result.retried = True
-            result.total_tokens += first.total_tokens
-            result.llm_calls += first.llm_calls
-            result.models = list(dict.fromkeys(first.models + result.models))
+            turn, result = self._attempt(Turn(user=text, note=note), emit, first_choice="required")
+            _merge_retry(first, result)
         if not result.error:
             self.turns.append(turn)
+        result.fallback_reason = getattr(self.client, "switch_reason", None)
         return result
 
-    def _attempt(self, text: str, note: str, emit: Callable[..., None],
-                 force_tool: bool) -> tuple[Turn, TurnResult]:
-        """One attempt at a turn. Not added to history here (a rejected draft must not be remembered)."""
-        turn = Turn(user=text, note=note)
+    def _start_turn(self) -> None:
+        """Tell the client a new turn starts (it may switch to its fallback at most once per turn)."""
+        if hasattr(self.client, "start_turn"):
+            self.client.start_turn()
+
+    # ---------------------------------------------------------------- direct path (known tool + arguments)
+    def start_direct(self, text: str, tool: str, args: dict,
+                     on_event: Callable[..., None] | None = None) -> Turn:
+        """Run a known tool call without the LLM. Returns the pending turn (records ready to render)."""
+        emit = on_event or _noop
+        emit("tool_start", name=tool, args=args)
+        record = execute_tool(tool, args, self.frames, self.tool_overrides)
+        emit("tool_done", name=tool, error=record.error)
+        call_id = f"direct_{len(self.turns) + 1}"
+        turn = Turn(user=text, records=[record])
+        turn.steps = [
+            {"role": "assistant", "content": "", "tool_calls": [{"id": call_id, "type": "function", "function": {
+                "name": tool, "arguments": json.dumps(args, ensure_ascii=False)}}]},
+            {"role": "tool", "tool_call_id": call_id, "content": record.llm_view},
+        ]
+        return turn
+
+    def explain(self, turn: Turn, on_event: Callable[..., None] | None = None) -> TurnResult:
+        """One LLM call (tool_choice="none") writes the explanation for a turn whose tool already ran."""
+        emit = on_event or _noop
+        self._start_turn()
+        pending = copy.deepcopy(turn)
+        done, result = self._attempt(turn, emit, first_choice="none")
+        if result.grounding_issues and not result.error:
+            emit("retry", issues=result.grounding_issues)
+            retry = copy.deepcopy(pending)
+            retry.note = ("[Your previous draft was rejected by an automatic check: "
+                          + "; ".join(result.grounding_issues) + ". Answer only from the tool output above.]")
+            first = result
+            done, result = self._attempt(retry, emit, first_choice="none")
+            _merge_retry(first, result)
+        if result.error:
+            # The tool call is real and deterministic: keep it in the conversation even if the LLM failed.
+            done = pending
+            done.answer = compose(answer_headline(done.records), "")
+        self.turns.append(done)
+        result.fallback_reason = getattr(self.client, "switch_reason", None)
+        return result
+
+    def ask_direct(self, text: str, tool: str, args: dict,
+                   on_event: Callable[..., None] | None = None) -> TurnResult:
+        return self.explain(self.start_direct(text, tool, args, on_event), on_event)
+
+    # ---------------------------------------------------------------- one attempt
+    def _attempt(self, turn: Turn, emit: Callable[..., None], first_choice: str) -> tuple[Turn, TurnResult]:
+        """One attempt at a turn. Not added to history here (a rejected draft must not be remembered).
+        first_choice: tool_choice of the first LLM call ("auto", "required" on a retry, "none" on the direct path
+        where the tool already ran)."""
+        text = turn.user
         tokens, calls, models = 0, 0, []
 
         def track(resp) -> None:
@@ -132,7 +196,7 @@ class Agent:
             answer = None
             for round_no in range(self.max_tool_rounds):
                 emit("llm_call", round=round_no, after_tools=bool(turn.records))
-                choice = "required" if force_tool and round_no == 0 else "auto"
+                choice = first_choice if round_no == 0 else "auto"
                 resp = self.client.complete(self.messages(turn), TOOL_SCHEMAS, tool_choice=choice)
                 tokens, calls = tokens + resp.total_tokens, calls + 1
                 track(resp)
@@ -145,31 +209,39 @@ class Agent:
                 resp = self.client.complete(self.messages(turn), TOOL_SCHEMAS, tool_choice="none")
                 tokens, calls, answer = tokens + resp.total_tokens, calls + 1, resp.content
                 track(resp)
-        except QuotaExhausted as exc:
-            return turn, TurnResult(str(exc), turn.records, [], tokens, calls, error="quota_exhausted", models=models)
-        except RateLimited as exc:
-            return turn, TurnResult(str(exc), turn.records, [], tokens, calls, error="rate_limited", models=models)
-        except Exception as exc:  # provider/network errors: do not crash the UI
-            return turn, TurnResult(
-                f"Sorry, the language model call failed ({type(exc).__name__}). Please try again.",
-                turn.records, [], tokens, calls, error=str(exc), models=models)
+        except Exception as exc:  # quota, rate limit, provider/network errors: do not crash the UI
+            if isinstance(exc, QuotaExhausted):
+                message, error = str(exc), "quota_exhausted"
+            elif isinstance(exc, RateLimited):
+                message, error = str(exc), "rate_limited"
+            else:
+                message, error = f"Sorry, the language model call failed ({type(exc).__name__}). Please try again.", str(exc)
+            headline = answer_headline(turn.records)
+            return turn, TurnResult(compose(headline, message, why_heading=False), turn.records, [], tokens, calls,
+                                    error=error, models=models, headline=headline, explanation=message)
 
-        turn.answer = answer.strip() or "I could not produce an answer. Please rephrase the question."
-        # Both what the scoring layer returned (envelope) and what the LLM actually saw (llm_view: precomputed
-        # differences and ranked drivers live only there) count as traceable sources.
+        llm_text = answer.strip() or "I could not produce an answer. Please rephrase the question."
+        headline = answer_headline(turn.records)
+        explanation = why_bullets(llm_text) if headline else llm_text
+        turn.answer = compose(headline, explanation)
+        # The headline is computed by code; the checks cover what the LLM wrote. Both what the scoring layer
+        # returned (envelope) and what the LLM saw (llm_view: precomputed differences and ranked drivers live
+        # only there) count as traceable sources.
         outputs = [x for t in [*self.turns, turn] for r in t.records for x in (r.envelope, r.llm_view)]
-        numbers = untraceable_numbers(turn.answer, outputs, user_text=text)
+        numbers = untraceable_numbers(explanation, outputs, user_text=text)
         grounded_text = json.dumps(outputs, ensure_ascii=False) + " " + " ".join(t.user for t in [*self.turns, turn])
-        issues = grounding_issues(turn.answer, text, [r.name for r in turn.records], list(TOOLS),
+        issues = grounding_issues(explanation, text, [r.name for r in turn.records], list(TOOLS),
                                   grounded_text, set(self.frames.airports["iata"]))
         return turn, TurnResult(turn.answer, turn.records, numbers, tokens, calls, models=models,
-                                grounding_issues=issues)
+                                grounding_issues=issues, headline=headline, explanation=explanation)
 
     def _run_tools(self, turn: Turn, resp, emit: Callable[..., None]) -> None:
         turn.steps.append({
             "role": "assistant", "content": resp.content or "",
             "tool_calls": [{"id": c.id, "type": "function",
-                            "function": {"name": c.name, "arguments": c.arguments}} for c in resp.tool_calls],
+                            "function": {"name": c.name, "arguments": c.arguments},
+                            **({"extra_content": c.extra} if getattr(c, "extra", None) else {})}
+                           for c in resp.tool_calls],
         })
         for call in resp.tool_calls:
             emit("tool_start", name=call.name, args=call.arguments)
@@ -177,6 +249,14 @@ class Agent:
             emit("tool_done", name=call.name, error=record.error)
             turn.records.append(record)
             turn.steps.append({"role": "tool", "tool_call_id": call.id, "content": record.llm_view})
+
+
+def _merge_retry(first: TurnResult, result: TurnResult) -> None:
+    """Fold the rejected first attempt's usage into the retry's result."""
+    result.retried = True
+    result.total_tokens += first.total_tokens
+    result.llm_calls += first.llm_calls
+    result.models = list(dict.fromkeys(first.models + result.models))
 
 
 def truncate(text: str, limit: int = OLD_ANSWER_CHARS) -> str:

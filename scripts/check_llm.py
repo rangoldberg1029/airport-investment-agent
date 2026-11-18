@@ -1,57 +1,42 @@
-"""Smoke test: verify the configured free LLM provider supports tool calling.
+"""Smoke test: verify the configured free LLM providers (primary and fallback) support tool calling.
 
 Usage:  python scripts/check_llm.py
-Reads LLM_API_KEY, LLM_BASE_URL, LLM_MODEL from .env and sends one chat request
-with a single dummy tool (get_time). Passes if the model returns a tool call.
+Reads the provider settings from .env (see .env.example and agent/llm.py) and sends one chat request per
+provider with a single dummy tool (get_time). Passes if each model returns a tool call.
 """
 
 import json
-import os
 import sys
+from pathlib import Path
 
-from dotenv import load_dotenv
-from openai import OpenAI
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from dotenv import load_dotenv  # noqa: E402
+
+from agent.llm import OpenAIChat, providers_from_env  # noqa: E402
 
 load_dotenv()
 
-api_key = os.getenv("LLM_API_KEY")
-base_url = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
-model = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
+TOOLS = [{"type": "function", "function": {
+    "name": "get_time",
+    "description": "Return the current time in a given IANA timezone.",
+    "parameters": {"type": "object",
+                   "properties": {"timezone": {"type": "string", "description": "e.g. America/New_York"}},
+                   "required": ["timezone"]},
+}}]
+QUESTION = [{"role": "user", "content": "What time is it in New York? Use the tool."}]
 
-if not api_key:
-    sys.exit("LLM_API_KEY is not set. Copy .env.example to .env and fill it in.")
-
-client = OpenAI(api_key=api_key, base_url=base_url)
-
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_time",
-            "description": "Return the current time in a given IANA timezone.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "timezone": {"type": "string", "description": "e.g. America/New_York"}
-                },
-                "required": ["timezone"],
-            },
-        },
-    }
-]
-
-response = client.chat.completions.create(
-    model=model,
-    messages=[{"role": "user", "content": "What time is it in New York? Use the tool."}],
-    tools=tools,
-)
-
-message = response.choices[0].message
-print(f"Provider: {base_url}\nModel:    {model}")
-
-if message.tool_calls:
-    call = message.tool_calls[0]
-    print(f"OK - tool call: {call.function.name}({json.loads(call.function.arguments)})")
-else:
-    print(f"FAIL - no tool call. Model replied: {message.content!r}")
-    sys.exit(1)
+failed = False
+for role, provider in zip(("Primary", "Fallback"), providers_from_env()):
+    if provider is None:
+        print(f"{role}: not configured")
+        continue
+    response = OpenAIChat(provider).complete(QUESTION, TOOLS)     # this provider alone
+    print(f"{role}: {provider.name} {provider.model}")
+    if response.tool_calls:
+        call = response.tool_calls[0]
+        print(f"  OK - tool call: {call.name}({json.loads(call.arguments)})")
+    else:
+        print(f"  FAIL - no tool call. Model replied: {response.content!r}")
+        failed = True
+sys.exit(1 if failed else 0)

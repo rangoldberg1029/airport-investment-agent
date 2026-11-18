@@ -1,8 +1,10 @@
-"""Manual evaluation against the real LLM (Groq free tier): 4 example questions + 3 follow-ups.
+"""Manual evaluation against the real LLMs (final configuration: primary + fallback): 4 example questions
++ 3 follow-ups, one conversation.
 
-Reports per turn: tools called (+ args), whether the tool choice is correct, tokens (provider usage),
-pacing waits and number-check flags, and writes everything (incl. final answers) to docs/eval/eval_results.md.
-Run:  python scripts/eval_agent.py --effort low|medium|both
+Reports per turn: tools called (+ args), whether the tool choice is correct, grounding and number checks,
+tokens (provider usage), latency, pacing waits and which model answered (with the fallback reason, if any).
+Writes everything (incl. final answers) to docs/eval/eval_results.md.
+Run:  python scripts/eval_agent.py [--no-fallback] [--effort minimal|low|medium]
 """
 
 import argparse
@@ -24,9 +26,7 @@ from scoring.config import INVESTMENT_WEIGHTS  # noqa: E402
 EVAL_DIR = Path(__file__).resolve().parents[1] / "docs" / "eval"
 
 
-def results_path(model: str) -> Path:
-    """One results file per model, e.g. docs/eval/eval_results_gpt-oss-120b.md."""
-    return EVAL_DIR / f"eval_results_{model.split('/')[-1]}.md"
+EVAL_RESULTS = EVAL_DIR / "eval_results.md"
 
 
 def _region_ok(args: dict) -> bool:
@@ -82,10 +82,14 @@ def grade(result, acceptable: set[str], no_tool_ok: bool, check) -> tuple[bool, 
     return True, "ok"
 
 
-def run(effort: str, show_answers: bool) -> dict:
-    client = OpenAIChat(reasoning_effort=effort, fallback_model="")   # measure one model alone
+def run(effort: str | None, show_answers: bool, use_fallback: bool = True) -> dict:
+    client = OpenAIChat.from_env(use_fallback=use_fallback)
+    if effort:
+        client.primary.effort = effort
+    effort = client.reasoning_effort or "n/a"
     agent = Agent(client, load_frames())
-    print(f"\n{'#' * 100}\n# reasoning_effort = {effort}   model = {client.model}\n{'#' * 100}")
+    print(f"\n{'#' * 100}\n# reasoning_effort = {effort}   model = {client.model}   "
+          f"fallback = {client.fallback_model or 'none'}\n{'#' * 100}")
     rows = []
     for i, (question, acceptable, no_tool_ok, check) in enumerate(SCRIPT, 1):
         waited_before = client.pacer.total_waited
@@ -102,10 +106,13 @@ def run(effort: str, show_answers: bool) -> dict:
                      "untraceable": result.untraceable_numbers, "wait": client.pacer.total_waited - waited_before,
                      "seconds": seconds, "tools": [(r.name, r.args, r.error) for r in result.tool_calls],
                      "answer": result.text, "grounding": result.grounding_issues,
-                     "retried": result.retried, "models": result.models})
+                     "retried": result.retried, "models": result.models,
+                     "fallback_reason": result.fallback_reason})
         print(f"\n--- [{i}] {question}")
         for line in summarize_calls(result.tool_calls):
             print(f"    tool: {line}")
+        print(f"    model: {' + '.join(result.models) or 'none'}"
+              + (f" (fallback: {result.fallback_reason})" if result.fallback_reason else ""))
         print(f"    tool choice: {'CORRECT' if ok else 'WRONG'} ({why}) | {result.llm_calls} LLM calls | "
               f"{result.total_tokens:,} tokens | {seconds:.1f}s (pacing wait {rows[-1]['wait']:.0f}s)")
         print(f"    grounding check: {'FAILED ' + '; '.join(result.grounding_issues) if result.grounding_issues else 'passed'}"
@@ -123,8 +130,12 @@ def run(effort: str, show_answers: bool) -> dict:
           f"(avg {total_tokens // len(rows):,}/turn, max {max(r['tokens'] for r in rows):,}) | "
           f"untraceable numbers {sum(r['flags'] for r in rows)} | grounding failures "
           f"{sum(bool(r['grounding']) for r in rows)} | retries {sum(r['retried'] for r in rows)} | "
-          f"pacing wait {sum(r['wait'] for r in rows):.0f}s")
-    return {"effort": effort, "model": client.model, "max_output_tokens": client.max_output_tokens,
+          f"pacing wait {sum(r['wait'] for r in rows):.0f}s | latency avg "
+          f"{sum(r['seconds'] for r in rows) / len(rows):.1f}s, max {max(r['seconds'] for r in rows):.1f}s")
+    return {"effort": effort, "model": client.model, "fallback_model": client.fallback_model,
+            "max_output_tokens": client.max_output_tokens,
+            "fallbacks": sum(bool(r["fallback_reason"]) for r in rows),
+            "latency_avg": sum(r["seconds"] for r in rows) / len(rows), "latency_max": max(r["seconds"] for r in rows),
             "tpm_limit": client.pacer.limit, "reasoning_effort_sent": client.reasoning_effort,
             "correct": correct, "n": len(rows), "tokens": total_tokens,
             "max_turn": max(r["tokens"] for r in rows), "flags": sum(r["flags"] for r in rows),
@@ -134,41 +145,49 @@ def run(effort: str, show_answers: bool) -> dict:
 
 def write_markdown(results: list[dict], path: Path | None = None) -> None:
     """Save the eval (summary, per-turn details and final answers) as markdown in the repo."""
-    path = path or results_path(results[0]["model"])
+    path = path or EVAL_RESULTS
     path.parent.mkdir(parents=True, exist_ok=True)
+    first = results[0]
     lines = [
         "# Agent evaluation results",
         "",
-        f"Generated by `python scripts/eval_agent.py` on {datetime.now():%Y-%m-%d %H:%M}. "
-        f"Model `{results[0]['model']}`, max output tokens per call {results[0]['max_output_tokens']}, "
-        f"provider token limit {results[0]['tpm_limit']:,}/min. "
-        "One conversation per run: the 4 example questions plus 3 follow-ups.",
+        f"Generated by `python scripts/eval_agent.py` on {datetime.now():%Y-%m-%d %H:%M}. Primary model "
+        f"`{first['model']}` (reasoning effort `{first['reasoning_effort_sent'] or 'n/a'}`), fallback "
+        f"`{first['fallback_model'] or 'none'}`; max output tokens per call {first['max_output_tokens']}. "
+        "One conversation: the 4 example questions plus 3 follow-ups, typed (the LLM chooses the tools).",
         "",
-        "Tokens = provider-reported usage (incl. hidden reasoning tokens). Pacing wait = time the client waited "
-        "to stay under the free tier's tokens-per-minute limit.",
+        "Every answer starts with a computed **Answer** line (built by code from the tool output); the LLM writes "
+        "only the *Why / drivers* bullets. The grounding and number checks run on the LLM part. Tokens = "
+        "provider-reported usage (incl. hidden reasoning tokens). Latency = wall time of the whole turn. Pacing "
+        "wait = time the client waited to stay under the primary's rate limits.",
         "",
         "## Summary",
         "",
-        "| reasoning effort (sent) | tool choice correct | grounding failures | retries | total tokens | avg / turn "
-        "| max turn | untraceable numbers | pacing wait |",
+        "| tool choice correct | grounding failures | retries | untraceable numbers | fallback turns "
+        "| latency avg / max | total tokens | avg / turn | pacing wait |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
-        lines.append(f"| {r['reasoning_effort_sent'] or 'n/a (not supported)'} | {r['correct']}/{r['n']} | "
-                     f"{r['grounding_failures']} | {r['retries']} | {r['tokens']:,} | {r['tokens'] // r['n']:,} | "
-                     f"{r['max_turn']:,} | {r['flags']} | {r['wait']:.0f} s |")
+        lines.append(f"| {r['correct']}/{r['n']} | {r['grounding_failures']} | {r['retries']} | {r['flags']} | "
+                     f"{r['fallbacks']} | {r['latency_avg']:.1f} s / {r['latency_max']:.1f} s | {r['tokens']:,} | "
+                     f"{r['tokens'] // r['n']:,} | {r['wait']:.0f} s |")
     for r in results:
-        lines += ["", f"## Run: reasoning_effort = {r['reasoning_effort_sent'] or 'n/a'}", "",
-                  "| # | question | tools called | tool choice | grounding | LLM calls | tokens | wait | number check |",
-                  "|---|---|---|---|---|---|---|---|---|"]
+        lines += ["", "## Per turn", "",
+                  "| # | question | tools called | tool choice | grounding | model | LLM calls | tokens | latency "
+                  "| wait | number check |",
+                  "|---|---|---|---|---|---|---|---|---|---|---|"]
         for row in r["rows"]:
             tools = "<br>".join(f"`{n}({json.dumps(a, ensure_ascii=False)})`" + (f" ERROR {e}" if e else "")
                                 for n, a, e in row["tools"]) or "none"
             check = "all traceable" if not row["untraceable"] else ", ".join(u["value"] for u in row["untraceable"])
             grounding = ("FAILED: " + "; ".join(row["grounding"])) if row["grounding"] else "passed"
             grounding += " (retried)" if row["retried"] else ""
+            model = " + ".join(m.split("/")[-1] for m in row["models"]) or "none"
+            if row["fallback_reason"]:
+                model += f" (fallback: {row['fallback_reason']})"
             lines.append(f"| {row['q']} | {row['question']} | {tools} | {'correct' if row['ok'] else 'WRONG'} "
-                         f"({row['why']}) | {grounding} | {row['calls']} | {row['tokens']:,} | {row['wait']:.0f} s | {check} |")
+                         f"({row['why']}) | {grounding} | {model} | {row['calls']} | {row['tokens']:,} | "
+                         f"{row['seconds']:.1f} s | {row['wait']:.0f} s | {check} |")
         lines += ["", "### Answers"]
         for row in r["rows"]:
             lines += ["", f"#### {row['q']}. {row['question']}", ""]
@@ -181,8 +200,10 @@ def write_markdown(results: list[dict], path: Path | None = None) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--effort", choices=["low", "medium", "both"], default="low")
+    parser.add_argument("--effort", choices=["minimal", "low", "medium", "both"], default=None,
+                        help="reasoning effort; default = the configured one (LLM_REASONING_EFFORT)")
     parser.add_argument("--no-answers", action="store_true", help="do not print the answer texts")
+    parser.add_argument("--no-fallback", action="store_true", help="measure the primary model alone")
     args = parser.parse_args()
     load_dotenv()
     efforts = ["low", "medium"] if args.effort == "both" else [args.effort]
@@ -191,7 +212,7 @@ if __name__ == "__main__":
         if k:
             print("\n(waiting 60 s so the token window resets between runs)")
             time.sleep(60)
-        results.append(run(effort, not args.no_answers))
+        results.append(run(effort, not args.no_answers, use_fallback=not args.no_fallback))
     write_markdown(results)
     if len(results) > 1:
         print(f"\n{'=' * 100}\nCOMPARISON")

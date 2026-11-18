@@ -11,11 +11,13 @@ from dotenv import load_dotenv
 from data.db import DB_PATH
 from data.repository import Frames, load_frames
 
-SECRET_KEYS = ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", "LLM_REASONING_EFFORT")
+SECRET_KEYS = ("GEMINI_API_KEY", "GEMINI_BASE_URL", "LLM_MODEL", "LLM_REASONING_EFFORT",
+               "LLM_API_KEY", "LLM_BASE_URL", "LLM_FALLBACK_MODEL", "LLM_FALLBACK_REASONING_EFFORT")
 
 
 def get_api_key() -> str | None:
-    """LLM_API_KEY from .env / environment, else from Streamlit secrets (Community Cloud)."""
+    """An LLM key (GEMINI_API_KEY primary, LLM_API_KEY = Groq fallback) from .env / environment, else from
+    Streamlit secrets (Community Cloud)."""
     load_dotenv(".env")
     try:
         for key in SECRET_KEYS:
@@ -23,7 +25,7 @@ def get_api_key() -> str | None:
                 os.environ[key] = str(st.secrets[key])
     except Exception:          # no secrets.toml: st.secrets raises
         pass
-    return os.getenv("LLM_API_KEY") or None
+    return os.getenv("GEMINI_API_KEY") or os.getenv("LLM_API_KEY") or None
 
 
 @st.cache_resource(show_spinner=False)
@@ -60,16 +62,22 @@ def get_answer_cache():
 
 
 def make_client():
-    """The real LLM client (Groq by default; provider set via LLM_BASE_URL / LLM_MODEL)."""
+    """The real LLM client: Gemini primary + Groq fallback (see agent/llm.py for the environment variables)."""
     from agent.llm import OpenAIChat
 
-    return OpenAIChat()
+    return OpenAIChat.from_env()
+
+
+def _host(provider) -> str:
+    return getattr(provider, "base_url", "").split("//")[-1].split("/")[0]
 
 
 def model_info(client) -> str:
+    """'gemini-3.5-flash-lite · generativelanguage.googleapis.com · reasoning: minimal' + fallback line."""
     model = getattr(client, "model", "unknown model")
-    base = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1").split("//")[-1].split("/")[0]
+    primary = getattr(client, "primary", None)
     effort = getattr(client, "reasoning_effort", None)
     fallback = getattr(client, "fallback_model", None)
-    return (f"{model} · {base}" + (f" · reasoning: {effort}" if effort else "")
-            + (f"  \n**Fallback:** {fallback}" if fallback else ""))
+    fb = getattr(client, "fallback", None)
+    return (f"{model}" + (f" · {_host(primary)}" if primary else "") + (f" · reasoning: {effort}" if effort else "")
+            + (f"  \n**Fallback:** {fallback}" + (f" · {_host(fb)}" if fb else "") if fallback else ""))

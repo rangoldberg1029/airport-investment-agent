@@ -50,27 +50,50 @@ def test_every_tool_view_has_official_name(frames, name, args, path):
 
 # ---------------------------------------------------------------- 3. follow-ups
 
+def questions(records) -> list[str]:
+    return [s.question for s in suggestions(records)]
+
+
 def test_followups_per_tool(frames):
     rank = execute_tool("rank_airports", {"states": ["MA", "CT"]}, frames)
     top = rank.envelope["data"]["ranking"]["ranking"][0]["airport"]
-    assert suggestions([rank]) == ["Rank them again with growth weighted higher", f"Show the profile of {top}",
-                                   f"What is the unmet demand at {top}?"]
+    assert questions([rank]) == ["Rank them again with growth weighted higher", f"Show the profile of {top}",
+                                 f"What is the unmet demand at {top}?"]
     regrown = execute_tool("rank_airports", {"states": ["MA"], "weights": {"growth": 0.6}}, frames)
-    assert suggestions([regrown])[0] == "Rank them again with default weights"
+    assert questions([regrown])[0] == "Rank them again with default weights"
 
     compare = execute_tool("compare_congestion", {"airports": ["AAA", "BBB"]}, frames)
     rows = sorted(compare.envelope["data"]["congestion"]["airports"], key=lambda r: r["congestion_index"])
-    assert suggestions([compare])[0] == f"Why is {rows[0]['airport']} lower?"
+    assert questions([compare])[0] == f"Why is {rows[0]['airport']} lower?"
 
     unmet = execute_tool("unmet_demand", {"airport": "AAA"}, frames)
-    assert suggestions([unmet])[0] == "What about SFO?"
+    assert questions([unmet])[0] == "What about SFO?"
     assert len(suggestions([unmet])) <= 3
+
+
+def test_followups_carry_the_tool_call_that_answers_them(frames):
+    rank = execute_tool("rank_airports", {"region": "new england", "top_n": 5}, frames)
+    again, profile, unmet = suggestions([rank])
+    assert (again.tool, again.args) == ("rank_airports", {"region": "new england", "weights": {"growth": 0.5}})
+    top = rank.envelope["data"]["ranking"]["ranking"][0]["airport"]
+    assert (profile.tool, profile.args) == ("get_airport_profile", {"airport": top})
+    assert (unmet.tool, unmet.args) == ("unmet_demand", {"airport": top})
+    # re-ranking with these arguments really raises the growth weight above the default
+    regrown = execute_tool(again.tool, again.args, frames)
+    assert regrown.envelope["data"]["ranking"]["weights"]["growth"] > 0.25
+    assert suggestions([regrown])[0].args == {"region": "new england"}          # back to default weights
+
+    compare = execute_tool("compare_congestion", {"airports": ["AAA", "BBB"]}, frames)
+    why = suggestions([compare])[0]
+    assert (why.tool, why.args) == ("compare_congestion", {"airports": ["AAA", "BBB"]})
+    long_haul = suggestions([execute_tool("long_haul_share", {"airport": "AAA"}, frames)])[0]
+    assert (long_haul.tool, long_haul.args) == ("long_haul_share", {"airport": "AAA", "threshold_mi": 2500})
 
 
 def test_followups_use_last_successful_call_and_skip_errors(frames):
     ok = execute_tool("long_haul_share", {"airport": "AAA"}, frames)
     bad = execute_tool("unmet_demand", {"airport": "Atlantis"}, frames)
-    assert suggestions([ok, bad])[0] == "What if long-haul starts at 2,500 miles?"
+    assert questions([ok, bad])[0] == "What if long-haul starts at 2,500 miles?"
     assert suggestions([bad]) == [] and suggestions([]) == []
 
 
@@ -83,9 +106,10 @@ def test_readable_period():
 
 
 def test_model_info_shows_fallback():
-    client = type("C", (), {"model": "openai/gpt-oss-120b", "reasoning_effort": "low",
-                            "fallback_model": "openai/gpt-oss-20b"})()
-    assert setup.model_info(client).endswith("**Fallback:** openai/gpt-oss-20b")
+    from tests.test_llm import _Seq, client_with, gemini, groq
+    info = setup.model_info(client_with(gemini(_Seq([])), groq(_Seq([]))))
+    assert info.startswith("gemini-3.5-flash-lite · generativelanguage.googleapis.com · reasoning: minimal")
+    assert info.endswith("**Fallback:** openai/gpt-oss-120b · api.groq.com")
 
 
 # ---------------------------------------------------------------- 7. daily quota
@@ -100,55 +124,36 @@ class Http429(Exception):
 
 TPD = Http429("Rate limit reached for model `openai/gpt-oss-120b` on tokens per day (TPD): Limit 200000, Used 199171")
 TPM = Http429("Rate limit reached for model `openai/gpt-oss-120b` on tokens per minute (TPM): Limit 8000")
+GEMINI_RPD = Http429("Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, "
+                     "limit: 1000 ... quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier")
+GEMINI_RPM = Http429("Quota exceeded ... quotaId: GenerateRequestsPerMinutePerProjectPerModel-FreeTier")
 
 
 def test_is_daily_limit():
     assert is_daily_limit(TPD) and not is_daily_limit(TPM)
+    assert is_daily_limit(GEMINI_RPD) and not is_daily_limit(GEMINI_RPM)
 
 
-class _Seq:
-    def __init__(self, outcomes):
-        self.outcomes, self.models = list(outcomes), []
-        outer = self
-
-        class _Raw:
-            def create(self, **kwargs):
-                outer.models.append(kwargs["model"])
-                item = outer.outcomes.pop(0)
-                if isinstance(item, Exception):
-                    raise item
-                return item
-        self.chat = type("Chat", (), {"completions": type("Comp", (), {"with_raw_response": _Raw()})()})()
-
-
-def _raw(content="ok"):
-    msg = type("M", (), {"content": content, "tool_calls": None})()
-    usage = type("U", (), {"total_tokens": 10, "prompt_tokens": 10, "completion_tokens": 0})()
-    parsed = type("C", (), {"choices": [type("Ch", (), {"message": msg})()], "usage": usage})()
-    return type("R", (), {"headers": {}, "parse": lambda self: parsed})()
-
-
-def _client():
-    from agent.llm import OpenAIChat
-    return OpenAIChat(api_key="test", model="openai/gpt-oss-120b", fallback_model="openai/gpt-oss-20b",
-                      sleep=lambda s: None)
+def _clients(gemini_outcomes, groq_outcomes):
+    from tests.test_llm import _Seq, client_with, gemini, groq
+    g, q = _Seq(gemini_outcomes), _Seq(groq_outcomes)
+    return client_with(gemini(g), groq(q)), g, q
 
 
 def test_daily_limit_switches_to_fallback_for_rest_of_session():
-    client = _client()
-    client.client = _Seq([TPD, _raw("one"), _raw("two")])
-    assert client.complete([{"role": "user", "content": "q1"}], tools=[]).model == "openai/gpt-oss-20b"
-    assert client.complete([{"role": "user", "content": "q2"}], tools=[]).model == "openai/gpt-oss-20b"
-    assert client.client.models == ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "openai/gpt-oss-20b"]
-    assert client.exhausted == {"openai/gpt-oss-120b"}
+    from tests.test_llm import _raw
+    client, g, q = _clients([GEMINI_RPD], [_raw("one"), _raw("two")])
+    assert client.complete([{"role": "user", "content": "q1"}], tools=[]).model == "openai/gpt-oss-120b"
+    assert client.complete([{"role": "user", "content": "q2"}], tools=[]).model == "openai/gpt-oss-120b"
+    assert g.models == ["gemini-3.5-flash-lite"] and q.models == ["openai/gpt-oss-120b"] * 2
+    assert client.exhausted == {"gemini-3.5-flash-lite"}
 
 
 def test_both_models_exhausted_raises_quota_message(frames):
-    client = _client()
-    client.client = _Seq([TPD, TPD])
+    client, _, _ = _clients([GEMINI_RPD], [TPD])
     result = Agent(client, frames).ask("Rank New England airports")
     assert result.error == "quota_exhausted" and result.text == QUOTA_MESSAGE
-    assert client.exhausted == {"openai/gpt-oss-120b", "openai/gpt-oss-20b"}
+    assert client.exhausted == {"gemini-3.5-flash-lite", "openai/gpt-oss-120b"}
 
 
 # ---------------------------------------------------------------- 1, 3, 7 in the app

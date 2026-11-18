@@ -23,6 +23,13 @@ EXAMPLES = [
     "What is the percentage of long-haul flights out of Anchorage (ANC)?",
     "What is the unmet flight demand at SFO and why?",
 ]
+# The tool call that answers each example (fast path: run it directly, then one LLM call explains it).
+EXAMPLE_CALLS = [
+    ("rank_airports", {"region": "new england"}),
+    ("compare_congestion", {"airports": ["LAX", "SNA"]}),
+    ("long_haul_share", {"airport": "ANC"}),
+    ("unmet_demand", {"airport": "SFO"}),
+]
 
 
 def cap(text: str) -> str:
@@ -106,32 +113,50 @@ def render_evidence(records: list[ToolCallRecord]) -> None:
 
 
 def render_followups(records: list[ToolCallRecord], key: str, on_followup) -> None:
-    """2-3 suggested follow-up questions as small buttons; a click calls on_followup(question)."""
-    questions = suggestions(records)
-    if not questions:
+    """2-3 suggested follow-up questions as small buttons; a click calls on_followup(question, tool, args)."""
+    items = suggestions(records)
+    if not items:
         return
-    cols = st.columns(len(questions))
-    for i, (col, question) in enumerate(zip(cols, questions)):
-        col.button(question, key=f"{key}_followup_{i}", type="tertiary", icon=":material/subdirectory_arrow_right:",
-                   on_click=on_followup, args=(question,))
+    cols = st.columns(len(items))
+    for i, (col, s) in enumerate(zip(cols, items)):
+        col.button(s.question, key=f"{key}_followup_{i}", type="tertiary", icon=":material/subdirectory_arrow_right:",
+                   on_click=on_followup, args=(s.question, s.tool, s.args))
+
+
+def render_details(records: list[ToolCallRecord]) -> None:
+    """'Key facts' (computed) and the Evidence expander for one answer."""
+    facts = key_facts(records)
+    if facts:
+        with st.container(border=True):
+            st.markdown("**Key facts** · *computed, not AI-generated*")
+            st.markdown("\n".join(f"- {f}" for f in facts))
+    if records:
+        with st.expander(f"Evidence ({len(records)} tool call{'s' if len(records) != 1 else ''})"):
+            render_evidence(records)
 
 
 def render_assistant(message: dict, show_meta: bool = True, key: str | None = None, on_followup=None) -> None:
-    """Answer text, then 'Key facts' (computed), number-check warning, the Evidence expander and suggested
-    follow-ups (when `key` and `on_followup` are given). show_meta=False when the live status label already
-    shows 'Done'."""
+    """Answer text (computed Answer line + the LLM's Why / drivers), check warnings, Key facts, Evidence and
+    suggested follow-ups (when `key` and `on_followup` are given). show_meta=False when the live status label
+    already shows 'Done'."""
     if message.get("cached"):
         if hasattr(st, "badge"):
             st.badge("Cached result", icon=":material/bolt:", color="gray")
         else:
             st.caption("Cached result")
     st.markdown(message["text"])
+    render_checks(message)
     records = message.get("records") or []
-    facts = key_facts(records)
-    if facts:
-        with st.container(border=True):
-            st.markdown("**Key facts** · *computed, not AI-generated*")
-            st.markdown("\n".join(f"- {f}" for f in facts))
+    render_details(records)
+    meta = message.get("meta")
+    if meta and show_meta:
+        st.caption(meta)
+    if key is not None and on_followup is not None and not message.get("error"):
+        render_followups(records, key, on_followup)
+
+
+def render_checks(message: dict) -> None:
+    """Grounding-check and number-check notices for the LLM-written part of an answer."""
     if message.get("grounding_issues"):
         items = "\n".join(f"- {i}" for i in message["grounding_issues"])
         st.warning("**Grounding check failed:** this answer could not be verified against the tool calls of this "
@@ -144,11 +169,3 @@ def render_assistant(message: dict, show_meta: bool = True, key: str | None = No
         items = "\n".join(f"- `{n['value']}` in: ...{n['context']}..." for n in message["untraceable"])
         st.warning("**Number check:** these numbers in the answer could not be traced to a tool output. "
                    "Verify them against the Evidence below.\n\n" + items)
-    if records:
-        with st.expander(f"Evidence ({len(records)} tool call{'s' if len(records) != 1 else ''})"):
-            render_evidence(records)
-    meta = message.get("meta")
-    if meta and show_meta:
-        st.caption(meta)
-    if key is not None and on_followup is not None and not message.get("error"):
-        render_followups(records, key, on_followup)

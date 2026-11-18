@@ -70,9 +70,10 @@ def test_invented_rerank_triggers_retry_with_required_tool_call(frames):
     assert result.retried and result.grounding_issues == []
     assert [r.name for r in result.tool_calls] == ["rank_airports"]
     assert result.tool_calls[0].args["region"] == "new england" and result.tool_calls[0].args["weights"]["growth"] == 0.4
-    assert result.text.startswith("With growth weighted higher")
+    assert result.explanation.startswith("With growth weighted higher")
+    assert result.text.startswith("**Answer** - Top ") and "growth-weighted" in result.headline
     # the invented draft never enters the conversation history
-    assert [t.answer for t in agent.turns] == ["AAA leads New England.", result.text]
+    assert agent.turns[0].answer.endswith("AAA leads New England.") and agent.turns[1].answer == result.text
     assert all(INVENTED not in json.dumps(m) for m in fake.seen[-1])
 
 

@@ -16,7 +16,7 @@ from data.repository import load_frames  # noqa: E402
 
 if __name__ == "__main__":
     load_dotenv()
-    agent = Agent(OpenAIChat(), load_frames())
+    agent = Agent(OpenAIChat.from_env(), load_frames())
     print("Airport investment agent - ask a question (/reset, /quit)")
     while True:
         try:
