@@ -6,6 +6,9 @@ secondaryBackgroundColor = "#f3f5f8"
 textColor = "#1b1f24"
 font = "sans serif"
 
+[client]
+toolbarMode = "viewer"      # hide the Deploy button and developer menu
+
 [server]
 headless = true
 

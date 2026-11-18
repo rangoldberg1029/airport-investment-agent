@@ -128,5 +128,7 @@ def test_status_reporter_steps_and_countdown():
 def test_about_text_is_generated_from_config(frames):
     text = about_markdown(frames)
     assert "Sep 2025 - Aug 2026" in text and "3,000" in text and "5,000 ft" in text
-    assert "manual download" in text and "public API" in text
+    assert "Manual download" in text and "Public API (Socrata SODA)" in text      # first letter only capitalized
+    assert "| ID | Source | Access | Period | Used for |" in text
+    assert "Sep 2024 – Aug 2026" in text and "2024-09..2026-08" not in text        # readable periods
     assert "Every number is computed by deterministic Python" in text

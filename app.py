@@ -14,8 +14,7 @@ from ui.cache import cache_key
 from ui.progress import StatusReporter
 from ui.render import EXAMPLES, about_markdown, render_assistant
 
-st.set_page_config(page_title="Airport Investment Intelligence", page_icon=":material/flight_takeoff:",
-                   layout="wide")
+st.set_page_config(page_title="Airport Investment Intelligence", page_icon="✈️", layout="wide")
 
 st.title("Airport Investment Intelligence")
 st.markdown("Find US airports where terminal and capacity investments are most likely to pay off, "
@@ -24,8 +23,13 @@ st.markdown("Find US airports where terminal and capacity investments are most l
 api_key = setup.get_api_key()
 frames = setup.get_frames()
 
-with st.expander("About this agent"):
+with st.expander("About this agent", expanded=False):
     st.markdown(about_markdown(frames))
+
+
+def ask_later(question: str) -> None:
+    """Button callback: queue a question (runs before the rerun, so the page redraws with it already queued)."""
+    st.session_state.pending = question
 
 # ---------------------------------------------------------------- session state
 if "messages" not in st.session_state:
@@ -38,15 +42,14 @@ st.session_state.setdefault("pending", None)
 with st.sidebar:
     st.subheader("Example questions")
     for i, q in enumerate(EXAMPLES):
-        if st.button(q, key=f"example_{i}", width="stretch", disabled=not api_key):
-            st.session_state.pending = q
+        st.button(q, key=f"example_{i}", width="stretch", disabled=not api_key, on_click=ask_later, args=(q,))
     if st.button("New conversation", key="new_conversation", type="primary", width="stretch"):
         st.session_state.messages = []
         if "agent" in st.session_state:
             st.session_state.agent.reset()
         st.session_state.pop("voice_text", None)
 
-    st.subheader("Ask by voice")
+    st.subheader("Ask by voice (beta)")
     if not api_key:
         st.caption("Available once the API key is configured.")
     elif not hasattr(st, "audio_input"):
@@ -88,17 +91,30 @@ if not api_key:
             "3. Restart the app: `streamlit run app.py`.\n\n"
             "The data and methodology above are available without a key.")
 
+# ---------------------------------------------------------------- empty state
+EXAMPLE_TITLES = ["Expansion candidates", "Congestion comparison", "Long-haul share", "Unmet demand"]
+incoming = st.session_state.get("chat_input") or st.session_state.pending
+if not st.session_state.messages and not incoming:
+    st.markdown("#### Welcome")
+    st.markdown("Ask about passenger demand, congestion or expansion candidates at US airports, "
+                "or start with one of these questions:")
+    cols = st.columns(2)
+    for i, (title, q) in enumerate(zip(EXAMPLE_TITLES, EXAMPLES)):
+        with cols[i % 2].container(border=True):
+            st.markdown(f"**{title}**")
+            st.button(q, key=f"card_{i}", type="tertiary", disabled=not api_key, on_click=ask_later, args=(q,))
+
 # ---------------------------------------------------------------- history
-for message in st.session_state.messages:
+for idx, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         if message["role"] == "user":
             st.markdown(message["text"])
         else:
-            render_assistant(message)
+            render_assistant(message, key=f"msg{idx}", on_followup=ask_later)
 
 # ---------------------------------------------------------------- new question
 typed = st.chat_input("Ask about US airport demand, congestion or expansion candidates",
-                      disabled=not api_key)
+                      disabled=not api_key, key="chat_input")
 question = typed or st.session_state.pending
 st.session_state.pending = None
 
@@ -126,7 +142,7 @@ if question and api_key:
             message = {**cached.message, "cached": True}
             message["meta"] = "Cached result · " + message["meta"].removeprefix("Done · ")
             st.session_state.messages.append(message)
-            render_assistant(message)
+            render_assistant(message, key=f"msg{len(st.session_state.messages) - 1}", on_followup=ask_later)
         else:
             started = time.monotonic()
             with st.status("Analyzing question...", expanded=False) as status:
@@ -140,12 +156,13 @@ if question and api_key:
             if result.error == "rate_limited":
                 text = "The LLM provider is temporarily at capacity. Please try again in about a minute."
             else:
-                text = result.text
+                text = result.text           # includes the daily-capacity message when every model is exhausted
             message = {"role": "assistant", "text": text, "records": result.tool_calls,
-                       "untraceable": result.untraceable_numbers, "meta": done,
+                       "untraceable": result.untraceable_numbers, "meta": done, "error": result.error,
                        "grounding_issues": result.grounding_issues, "retried": result.retried}
             st.session_state.messages.append(message)
-            render_assistant(message, show_meta=False)     # the status label above already shows "Done"
+            render_assistant(message, show_meta=False,     # the status label above already shows "Done"
+                             key=f"msg{len(st.session_state.messages) - 1}", on_followup=ask_later)
             if (first_question and not result.error and not result.untraceable_numbers
                     and not result.grounding_issues):
                 setup.get_answer_cache().put(key, message, agent.turns[-1])

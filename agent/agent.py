@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from agent.guardrails import grounding_issues, untraceable_numbers
-from agent.llm import LLMClient, RateLimited
+from agent.llm import LLMClient, QuotaExhausted, RateLimited
 from agent.prompts import SYSTEM_PROMPT
 from agent.tools import TOOL_SCHEMAS, TOOLS, ToolCallRecord, execute_tool
 from data.repository import Frames
@@ -145,6 +145,8 @@ class Agent:
                 resp = self.client.complete(self.messages(turn), TOOL_SCHEMAS, tool_choice="none")
                 tokens, calls, answer = tokens + resp.total_tokens, calls + 1, resp.content
                 track(resp)
+        except QuotaExhausted as exc:
+            return turn, TurnResult(str(exc), turn.records, [], tokens, calls, error="quota_exhausted", models=models)
         except RateLimited as exc:
             return turn, TurnResult(str(exc), turn.records, [], tokens, calls, error="rate_limited", models=models)
         except Exception as exc:  # provider/network errors: do not crash the UI

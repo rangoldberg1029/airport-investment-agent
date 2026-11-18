@@ -82,10 +82,8 @@ def test_unmet_demand_drivers_include_difference_to_median(frames):
         assert delta.startswith("+")                         # drivers are above the median
     assert "independent of load factor" in d["component_meanings"]["completion_gap"]
     assert "do not cause" in d["note"]
-    assert set(d["capacity_gap"]) == {"target_0.85", "target_0.80"}
-    entry = d["capacity_gap"]["target_0.85"]
-    assert set(entry) == {"window_12_months", "peak_month", "interpretation"}
-    assert entry["peak_month"]["month"] == "2026-07"
+    assert set(d["capacity_gap_interpretation"]) == {"target_0.85", "target_0.80"}
+    assert "peak month 2026-07" in d["headline"]          # numbers live in the headline (no duplicate table)
 
 
 def test_unmet_view_leads_with_capacity_gap_headline(frames):

@@ -50,6 +50,26 @@ def diff(a, b, digits: int = 2):
     return round(a - b, digits)
 
 
+def airport_name(frames: Frames, iata: str) -> str:
+    """Official airport name from the airports table (OurAirports); the code itself if unknown."""
+    match = frames.airports.loc[frames.airports["iata"] == iata, "name"]
+    return str(match.iloc[0]) if len(match) else iata
+
+
+def labelled(frames: Frames, iata: str) -> str:
+    """'BOS Boston Logan International Airport': code + official name, as the LLM must quote it."""
+    name = airport_name(frames, iata)
+    return iata if name == iata else f"{iata} {name}"
+
+
+def weights_label(weights: dict) -> str:
+    """'default weights' or e.g. 'growth-weighted' (the component with the largest custom weight)."""
+    if all(abs(weights[k] - INVESTMENT_WEIGHTS[k]) < 1e-9 for k in INVESTMENT_WEIGHTS):
+        return "default weights"
+    top = max(weights, key=weights.get)
+    return f"{top.replace('_', ' ')}-weighted"
+
+
 def merge(parts: list[dict], data: dict, period: str | None = None) -> dict:
     """Combine several envelopes into one (union of sources/assumptions/caveats)."""
     return envelope(
@@ -219,7 +239,7 @@ def get_airport_profile(frames: Frames, airport: str) -> tuple[dict, dict]:
     n = inv["data"]["ranked_nationally"]
     pct3 = ("delay_rate_pct", "nas_share_pct", "cancellation_rate_pct")
     data = {
-        "airport": iata, "hub": p["hub"], "state": p["state"],
+        "airport": iata, "name": airport_name(frames, iata), "hub": p["hub"], "state": p["state"],
         "passengers": u(p["passengers"], "passengers"), "seats": u(p["seats"], "seats"),
         "departures": u(p["departures"], "departures"),
         "load_factor_avg": u(p["load_factor_avg"], "LF"), "load_factor_peak": u(p["load_factor_peak_month"], "LF"),
@@ -265,19 +285,24 @@ def rank_airports(frames: Frames, region: str | None = None, states: list[str] |
     for i, r in enumerate(rows[:top_n]):
         raw = {c["component"]: c["raw_value"] for c in r["components"]}
         nxt = rows[i + 1]["investment_score"] if i + 1 < len(rows) else None
-        table.append([r["rank"], r["airport"], r["state"], r["hub"], r["investment_score"], r["national_rank"],
+        table.append([r["rank"], r["airport"], airport_name(frames, r["airport"]), r["state"], r["hub"],
+                      r["investment_score"], r["national_rank"],
                       uc("demand_pressure", raw["demand_pressure"]), uc("growth", raw["growth"]),
                       uc("congestion", raw["congestion"]), uc("scale", raw["scale"]),
                       [f"{c['contribution']} pts" for c in r["components"]],
                       u(diff(r["investment_score"], nxt, 1), "pts")])
+    headline = (f"Ranking ({weights_label(inv['data']['weights'])}): "
+                + "; ".join(f"{r['rank']}. {labelled(frames, r['airport'])} {r['investment_score']}"
+                            for r in rows[:top_n])) if rows else "No airport in this selection is ranked."
     data = {
-        "header": ["rank", "airport", "state", "hub", "score", "natl_rank", "load_factor", "growth",
+        "headline": headline,
+        "header": ["rank", "airport", "name", "state", "hub", "score", "natl_rank", "load_factor", "growth",
                    "congestion", "passengers", "contribution[demand,growth,congestion,scale]", "score_gap_to_next"],
         "rows": table,
         "n_more": max(0, len(rows) - top_n),
         "ranked_nationally": inv["data"]["ranked_nationally"],
         "weights": inv["data"]["weights"],
-        "outside_ranking_universe": [o["airport"] for o in inv["data"]["outside_ranking_universe"]],
+        "outside_ranking_universe": [labelled(frames, o["airport"]) for o in inv["data"]["outside_ranking_universe"]],
         "stability_top3": stab["data"]["rankings"],
         "stability_same_set": stab["data"]["same_top_n_set"],
         "interpretation": "score = sum of the four contributions; score_gap_to_next = score minus the next airport's score",
@@ -316,6 +341,7 @@ def compare_congestion(frames: Frames, airports: list[str]) -> tuple[dict, dict]
     index = {r["airport"]: r["congestion_index"] for r in rows}
     data = {
         "airports": codes,
+        "names": {a: airport_name(frames, a) for a in codes},
         "hubs": {r["airport"]: r["hub"] for r in rows},
         "congestion_national_rank": {r["airport"]: f"{r['national_rank']} of {r['ranked_airports']}" for r in rows},
         "values": {label: {a: u(raw[label][a], units[label]) for a in codes} for label in raw},
@@ -352,16 +378,16 @@ def long_haul_share(frames: Frames, airport: str, threshold_mi: int | None = Non
     d = env["data"]
     key = f"top_routes_at_or_above_{default}_mi"
     data = {
-        "airport": d["airport"], "threshold": f"{default:,} mi",
+        "airport": d["airport"], "name": airport_name(frames, d["airport"]), "threshold": f"{default:,} mi",
         "departure_share": u(d["long_haul_departure_share_pct"], "%"),
         "seat_share": u(d["long_haul_seat_share_pct"], "%"),
         "total_passenger_departures": u(d["total_passenger_departures"], "departures"),
         "sensitivity": [[f"{s['threshold_mi']:,} mi", u(s["departure_share_pct"], "%"), u(s["seat_share_pct"], "%")]
                         for s in d["sensitivity"]],
         "sensitivity_header": ["threshold", "departure_share", "seat_share"],
-        "top_routes": [[r["dest"], r["dest_country"], f"{int(r['distance_mi']):,} mi",
+        "top_routes": [[r["dest"], airport_name(frames, r["dest"]), r["dest_country"], f"{int(r['distance_mi']):,} mi",
                         u(int(r["departures"]), "departures"), u(int(r["seats"]), "seats")] for r in d[key]],
-        "top_routes_header": ["dest", "country", "distance", "departures", "seats"],
+        "top_routes_header": ["dest", "name", "country", "distance", "departures", "seats"],
         "interpretation": "A lower threshold counts more routes as long-haul, so the share rises as the threshold falls",
     }
     return env, data
@@ -373,22 +399,13 @@ def unmet_demand(frames: Frames, airport: str) -> tuple[dict, dict]:
     dly = metrics.delay_profile(frames, d["airport"])
     dd = dly["data"]
 
-    def gap_view(g: dict) -> dict:
-        return {"current_load_factor": u(g["current_load_factor"], "LF"), "extra_seats": u(g["extra_seats"], "seats"),
-                "extra_seats_pct": u(g["extra_seats_pct"], "%"),
-                "extra_departures": u(g["extra_departures"], "departures")}
-
-    gaps = {
-        target: {
-            "window_12_months": gap_view(entry["window"]),
-            "peak_month": {"month": entry["peak_month"]["month"], **gap_view(entry["peak_month"])},
-            "interpretation": entry["interpretation"],
-        }
-        for target, entry in d["capacity_gap"].items()
-    }
+    # The headline already states every capacity-gap number (both targets x both periods); the LLM view adds only
+    # the interpretation per target. The full table is in the envelope (Evidence tab).
+    gap_meanings = {target: entry["interpretation"] for target, entry in d["capacity_gap"].items()}
     data = {
         "headline": d["capacity_gap_headline"],
-        "airport": d["airport"], "hub": d["hub"], "unmet_demand_score": u(d["unmet_demand_score"], "/ 100"),
+        "airport": d["airport"], "name": airport_name(frames, d["airport"]), "hub": d["hub"],
+        "unmet_demand_score": u(d["unmet_demand_score"], "/ 100"),
         "components_header": COMP_HEADER, "components": comp_rows(d["components"]),
         "component_meanings": UNMET_MEANINGS,
         "note": INDEPENDENCE_NOTE,
@@ -404,7 +421,7 @@ def unmet_demand(frames: Frames, airport: str) -> tuple[dict, dict]:
             "nas_share": {"airport": u(dd["nas_share_pct"], "%"), "national": u(dd["national"]["nas_share_pct"], "%"),
                           "difference": u(diff(dd["nas_share_pct"], dd["national"]["nas_share_pct"]), "pp")},
         },
-        "capacity_gap": gaps,
+        "capacity_gap_interpretation": gap_meanings,
     }
     return merge([um, dly], {"unmet_demand": d, "delay_profile": dd}), data
 
@@ -417,11 +434,12 @@ def live_airport_status(frames: Frames, airport: str,
     try:
         events, stamp = fetch()
     except Exception as exc:
-        data = {"airport": iata, "status": "live FAA status unavailable right now", "error": type(exc).__name__}
+        data = {"airport": iata, "name": airport_name(frames, iata), "status": "live FAA status unavailable right now",
+                "error": type(exc).__name__}
         return envelope(data, ["FAA NAS Status (live)"], "live", [note] if note else [], caveats), data
     found = nas_status.parse_airport_events(events, iata)
     data = {
-        "airport": iata, "feed_timestamp": stamp,
+        "airport": iata, "name": airport_name(frames, iata), "feed_timestamp": stamp,
         "status": "active FAA events" if found else "no active FAA delay events reported right now",
         "events": found,
         "airports_with_events_nationally": len(events),

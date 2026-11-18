@@ -1,6 +1,8 @@
 """Rendering: the 'About this agent' text (pure) and one assistant message (answer, key facts, evidence)."""
 
 import json
+import re
+from datetime import date
 
 import streamlit as st
 
@@ -12,6 +14,7 @@ from scoring.config import (
     PRIOR_WINDOW, RANKING_UNIVERSE_HUBS, TARGET_LOAD_FACTOR, WINDOW,
 )
 from ui import evidence
+from ui.followups import suggestions
 from ui.key_facts import key_facts
 
 EXAMPLES = [
@@ -22,10 +25,27 @@ EXAMPLES = [
 ]
 
 
+def cap(text: str) -> str:
+    """Upper-case the first letter only ('public API' -> 'Public API', unlike str.capitalize)."""
+    return text[:1].upper() + text[1:]
+
+
+def readable_period(span: str) -> str:
+    """'2024-01..2026-08' -> 'Jan 2024 – Aug 2026'; '2023..2025' -> '2023 – 2025'; anything else unchanged."""
+    months = re.fullmatch(r"(\d{4})-(\d{2})\.\.(\d{4})-(\d{2})", span or "")
+    if months:
+        y0, m0, y1, m1 = map(int, months.groups())
+        return f"{date(y0, m0, 1):%b %Y} – {date(y1, m1, 1):%b %Y}"
+    years = re.fullmatch(r"(\d{4})\.\.(\d{4})", span or "")
+    if years:
+        return f"{years.group(1)} – {years.group(2)}"
+    return cap(span or "")
+
+
 def about_markdown(frames: Frames) -> str:
     """'About this agent' content, generated from config and the loaded data so it never goes stale."""
-    sources = "\n".join(f"| {s['id']} | {s['name']} | {s['access']} | {s['period']} | {', '.join(s['feeds'])} |"
-                        for s in _source_inventory(frames))
+    sources = "\n".join(f"| {s['id']} | {s['name']} | {cap(s['access'])} | {readable_period(s['period'])} | "
+                        f"{cap(', '.join(s['feeds']))} |" for s in _source_inventory(frames))
     return f"""
 **What it does.** Ranks and explains US airports where terminal or capacity investment is most likely to pay off,
 based on passenger demand versus capacity: load factors, growth, delays, airspace (NAS) delays and runway use.
@@ -48,7 +68,7 @@ Out of scope: non-US airports, construction costs, financing and returns, fares,
 
 **Data sources**
 
-| id | source | access | period | used for |
+| ID | Source | Access | Period | Used for |
 |---|---|---|---|---|
 {sources}
 """
@@ -85,9 +105,21 @@ def render_evidence(records: list[ToolCallRecord]) -> None:
             st.caption("**Caveats:**\n" + "\n".join(f"- {c}" for c in env["caveats"]))
 
 
-def render_assistant(message: dict, show_meta: bool = True) -> None:
-    """Answer text, then 'Key facts' (computed), number-check warning, and the Evidence expander.
-    show_meta=False when the live status label already shows the 'Done' line (avoid showing it twice)."""
+def render_followups(records: list[ToolCallRecord], key: str, on_followup) -> None:
+    """2-3 suggested follow-up questions as small buttons; a click calls on_followup(question)."""
+    questions = suggestions(records)
+    if not questions:
+        return
+    cols = st.columns(len(questions))
+    for i, (col, question) in enumerate(zip(cols, questions)):
+        col.button(question, key=f"{key}_followup_{i}", type="tertiary", icon=":material/subdirectory_arrow_right:",
+                   on_click=on_followup, args=(question,))
+
+
+def render_assistant(message: dict, show_meta: bool = True, key: str | None = None, on_followup=None) -> None:
+    """Answer text, then 'Key facts' (computed), number-check warning, the Evidence expander and suggested
+    follow-ups (when `key` and `on_followup` are given). show_meta=False when the live status label already
+    shows 'Done'."""
     if message.get("cached"):
         if hasattr(st, "badge"):
             st.badge("Cached result", icon=":material/bolt:", color="gray")
@@ -118,3 +150,5 @@ def render_assistant(message: dict, show_meta: bool = True) -> None:
     meta = message.get("meta")
     if meta and show_meta:
         st.caption(meta)
+    if key is not None and on_followup is not None and not message.get("error"):
+        render_followups(records, key, on_followup)

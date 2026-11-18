@@ -70,4 +70,6 @@ def model_info(client) -> str:
     model = getattr(client, "model", "unknown model")
     base = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1").split("//")[-1].split("/")[0]
     effort = getattr(client, "reasoning_effort", None)
-    return f"{model} · {base}" + (f" · reasoning: {effort}" if effort else "")
+    fallback = getattr(client, "fallback_model", None)
+    return (f"{model} · {base}" + (f" · reasoning: {effort}" if effort else "")
+            + (f"  \n**Fallback:** {fallback}" if fallback else ""))

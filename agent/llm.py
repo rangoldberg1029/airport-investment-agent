@@ -13,10 +13,20 @@ from typing import Callable, Protocol
 
 FRIENDLY_RATE_LIMIT = ("The LLM provider's rate limit was reached (tokens per minute or per day). "
                        "Please wait a minute and ask again.")
+QUOTA_MESSAGE = ("The language model's daily capacity has been reached. Key facts and Evidence still work via the "
+                 "example questions' cached results; try again later or add your own API key.")
 
 
 class RateLimited(Exception):
     """Raised when the provider still returns HTTP 429 after all retries."""
+
+
+class DailyLimitReached(Exception):
+    """A model hit its daily token quota (e.g. Groq 'tokens per day (TPD)'): retrying today is pointless."""
+
+
+class QuotaExhausted(Exception):
+    """Every configured model (primary and fallback) has hit its daily quota in this session."""
 
 
 @dataclass
@@ -46,6 +56,12 @@ def is_rate_limit(exc: Exception) -> bool:
     return getattr(exc, "status_code", None) == 429
 
 
+def is_daily_limit(exc: Exception) -> bool:
+    """HTTP 429 caused by a per-day quota (Groq message: '... on tokens per day (TPD): Limit 200000 ...')."""
+    text = str(exc).lower()
+    return is_rate_limit(exc) and ("tokens per day" in text or "(tpd)" in text or "requests per day" in text)
+
+
 def retry_after_seconds(exc: Exception) -> float | None:
     response = getattr(exc, "response", None)
     try:
@@ -64,6 +80,8 @@ def with_retry(fn: Callable[[], LLMResponse], max_retries: int = 3, max_total_wa
         except Exception as exc:
             if not is_rate_limit(exc):
                 raise
+            if is_daily_limit(exc):                 # waiting minutes/hours inside a chat turn is pointless
+                raise DailyLimitReached(str(exc)) from exc
             if attempt == max_retries:
                 break
             delay = retry_after_seconds(exc) or (2 ** (attempt + 1) + random.uniform(0, 1))
@@ -136,6 +154,8 @@ class OpenAIChat:
 
     Fallback (LLM_FALLBACK_MODEL, e.g. openai/gpt-oss-20b, separate provider rate limit) is used when the primary
     model would have to wait more than `fallback_after_s` for its token budget, or when it returns HTTP 429.
+    Daily quota: a model that returns a per-day 429 is marked exhausted for the rest of this client's life
+    (one client per UI session); when every model is exhausted, QuotaExhausted is raised.
     """
 
     def __init__(self, api_key: str | None = None, base_url: str | None = None, model: str | None = None,
@@ -158,6 +178,7 @@ class OpenAIChat:
         limit = tpm_limit or int(os.getenv("LLM_TPM_LIMIT", "8000"))
         self.pacers = {m: TpmPacer(limit=limit, sleep=sleep) for m in (self.model, self.fallback_model) if m}
         self.pacer = self.pacers[self.model]           # primary model's pacer
+        self.exhausted: set[str] = set()               # models that hit their daily quota in this session
         # Cap per LLM call. For gpt-oss it includes hidden reasoning tokens: answers in the eval were
         # <= ~600 tokens, reasoning at effort "low" ~100-300, so 1,000 leaves headroom.
         self.max_output_tokens = max_output_tokens or int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "1000"))
@@ -181,9 +202,18 @@ class OpenAIChat:
         except (TypeError, ValueError, AttributeError):
             pass
 
+    def available_models(self) -> list[str]:
+        return [m for m in (self.model, self.fallback_model) if m and m not in self.exhausted]
+
     def choose_model(self, estimate: int) -> str:
-        """Primary unless it would wait longer than fallback_after_s and a fallback exists."""
-        if self.fallback_model and self.pacer.wait_needed(estimate) > self.fallback_after_s:
+        """Primary unless it is out of daily quota, or would wait longer than fallback_after_s (and a usable
+        fallback exists)."""
+        available = self.available_models()
+        if not available:
+            raise QuotaExhausted(QUOTA_MESSAGE)
+        if self.model not in available:
+            return available[0]
+        if self.fallback_model in available and self.pacer.wait_needed(estimate) > self.fallback_after_s:
             return self.fallback_model
         return self.model
 
@@ -192,8 +222,17 @@ class OpenAIChat:
         model = self.choose_model(estimate)
         try:
             return self._call(model, messages, tools, tool_choice, estimate)
+        except DailyLimitReached:
+            self.exhausted.add(model)
+            return self.complete(messages, tools, tool_choice)      # next model, or QuotaExhausted
         except PrimaryRateLimited:
-            return self._call(self.fallback_model, messages, tools, tool_choice, estimate)
+            if self.fallback_model in self.exhausted:
+                raise RateLimited(FRIENDLY_RATE_LIMIT)
+            try:
+                return self._call(self.fallback_model, messages, tools, tool_choice, estimate)
+            except DailyLimitReached:
+                self.exhausted.add(self.fallback_model)
+                return self.complete(messages, tools, tool_choice)
 
     def _call(self, model: str, messages: list[dict], tools: list[dict], tool_choice: str, estimate: int) -> LLMResponse:
         pacer = self.pacers[model]
@@ -204,10 +243,12 @@ class OpenAIChat:
         if effort:
             kwargs["reasoning_effort"] = effort
         request = lambda: self.client.chat.completions.with_raw_response.create(**kwargs)  # noqa: E731
-        if model == self.model and self.fallback_model:
-            try:                                   # primary with a fallback: no retry, switch on 429
+        if model == self.model and self.fallback_model and self.fallback_model not in self.exhausted:
+            try:                                   # primary with a usable fallback: no retry, switch on 429
                 raw = request()
             except Exception as exc:
+                if is_daily_limit(exc):
+                    self.exhausted.add(model)      # out for today: use the fallback for the rest of the session
                 if is_rate_limit(exc):
                     raise PrimaryRateLimited() from exc
                 raise
