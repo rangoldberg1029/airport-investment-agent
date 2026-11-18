@@ -1,7 +1,7 @@
 """BTS Airline On-Time Delay Cause -> arrival airport x month table (carriers summed).
 
 TranStats has no documented API: we POST the page's own period form, then GET the
-"Download Raw Data" link it renders (verified in the data spike, scripts/spike/probe_c_delay_cause.py).
+"Download Raw Data" link it renders (verified in the data validation, docs/data_validation.md).
 """
 
 import io

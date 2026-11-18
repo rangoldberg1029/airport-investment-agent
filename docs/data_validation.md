@@ -1,6 +1,8 @@
-# Data spike findings (2026-11-18)
+# Data validation: source checks and KPI feasibility (2026-11-18)
 
-Source details and URLs: [data/raw/README.md](../../data/raw/README.md).
+How each public source was verified before the ETL was built, and which KPI each source can support. The
+ongoing checks run in `data/quality.py` at the end of every ETL. Source details and URLs:
+[data/raw/README.md](../data/raw/README.md).
 Source letters: **A** Socrata airport-month T-100 · **B** TranStats T-100 Segment (route-level, manual) ·
 **C** Delay Cause · **D** FAA enplanements · **E** OurAirports · **F** NAS Status.
 

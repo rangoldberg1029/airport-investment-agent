@@ -50,8 +50,9 @@ compact, human-readable view for the LLM. Scoring functions are pure and unit-te
 | OurAirports | Public file download (CSV) | Current snapshot | Airport names and states, commercial runway count |
 | FAA NAS Status | Public API (live, not formally documented) | Real time | Live delays and ground stops: context only, never scored |
 
-Provenance, exact URLs and the manual T-100 download steps are in `data/raw/README.md`. The processed files
-and their row counts are listed in `data/processed/README.md`.
+Provenance, exact URLs and the manual T-100 download steps are in `data/raw/README.md`; the source checks and
+KPI feasibility are in `docs/data_validation.md`. The processed files and their row counts are listed in
+`data/processed/README.md`.
 
 **Data validation** (`data/quality.py`, run at the end of every ETL):
 - **Passenger cross-check:** CY2025 passengers from T-100, Socrata and FAA enplanements agree within 1% for the
@@ -188,7 +189,7 @@ Response times (`scripts/measure_fast_path.py`, the 4 example questions):
 | Typed question | avg 3.0 s | avg 4.7 s | avg 7.7 s |
 
 Full per-turn details and all answers are in `docs/eval/eval_results.md`; the model comparison is in
-`docs/eval/model_comparison.md`. The code has 265 offline unit and app tests (fake LLMs, no network); they run in
+`docs/eval/model_comparison.md`. The code has 268 offline unit and app tests (fake LLMs, no network); they run in
 CI on every push.
 
 ## 7. Key tradeoffs

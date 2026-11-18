@@ -33,7 +33,7 @@ def to_builtin(obj):
 
 def envelope(data, sources: list[str], data_period: str,
              assumptions: list[str], caveats: list[str]) -> dict:
-    """The standard tool result from CLAUDE.md."""
+    """The standard tool result: {data, sources, data_period, assumptions, caveats}."""
     return to_builtin({
         "data": data,
         "sources": list(dict.fromkeys(sources)),

@@ -4,7 +4,7 @@ Change a value here and every answer changes consistently. Answers quote these v
 """
 
 # ---------------------------------------------------------------- time windows
-# Trailing 12 months (inclusive (year, month)); agreed in scripts/spike/FINDINGS.md.
+# Trailing 12 months (inclusive (year, month)); see docs/data_validation.md.
 WINDOW = ((2025, 9), (2026, 8))
 PRIOR_WINDOW = ((2024, 9), (2025, 8))   # the 12 months before WINDOW, for YoY growth
 

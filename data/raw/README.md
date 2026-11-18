@@ -1,8 +1,8 @@
 # Raw data provenance
 
 Raw files in this folder are **git-ignored** (only this README is committed).
-All sources below were verified on **2026-11-18** with the probe scripts in `scripts/spike/`.
-Test airports used for every probe: BOS, LAX, SNA, ANC, SFO.
+All sources below were verified on **2026-11-18**; findings in [docs/data_validation.md](../../docs/data_validation.md).
+Reference airports used for every check: BOS, LAX, SNA, ANC, SFO.
 
 ## Summary
 
@@ -47,7 +47,8 @@ Test airports used for every probe: BOS, LAX, SNA, ANC, SFO.
 4. Tick **Download as zip** (and optionally *Term definitions*). Click **Download**.
 5. Save the zip as `data/raw/t100_segment/T100_SEGMENT_2024.zip`.
 6. Repeat for **2025** and **2026** (2026 = Jan–Aug, the latest available).
-7. Run `python scripts/spike/probe_b_t100_segment.py` – it prints columns, months and sample rows.
+7. Run `python -m data.etl --from-raw` – it reads the zips, rebuilds the database and prints the
+   data-quality report (completeness, passenger cross-check, sanity checks).
 
 Downloaded files (2026-11-18): `T_T100_SEGMENT_ALL_CARRIER_<timestamp>.zip`, each containing
 `T_T100_SEGMENT_ALL_CARRIER.csv` with all 50 fields. No term-definitions file was included.

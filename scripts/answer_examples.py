@@ -1,4 +1,4 @@
-"""Answer the 4 example questions from CLAUDE.md with deterministic Python only (no LLM).
+"""Answer the 4 example questions (see README.md) with deterministic Python only (no LLM).
 
 Every number printed below comes from scoring/* envelopes; this file only formats them.
 Run:  python scripts/answer_examples.py   (needs data/airports.duckdb: python -m data.etl --offline)

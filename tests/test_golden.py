@@ -1,6 +1,6 @@
 """Golden checks against the real DuckDB (skipped when data/airports.duckdb has not been built).
 
-Expected values come from the data spike (scripts/spike/FINDINGS.md), computed independently.
+Expected values come from the data validation (docs/data_validation.md), computed independently.
 """
 
 import pytest

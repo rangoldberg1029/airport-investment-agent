@@ -55,6 +55,12 @@ On first start the app builds its local database from the committed data in `dat
 seconds, no network needed). For a deployment, put the same keys in Streamlit secrets
 (see `.streamlit/secrets.toml.example`).
 
+## Deploy (Streamlit Community Cloud)
+
+Create an app from this repository with `app.py` as the entry point and Python 3.12. In the app's
+**Secrets**, add `GEMINI_API_KEY` (required) and optionally `GROQ_API_KEY`, as in
+`.streamlit/secrets.toml.example`. The database builds automatically on first start.
+
 ## Running tests
 
 ```bash
@@ -85,9 +91,10 @@ data/                   ETL, DuckDB access, data-quality checks, one module per 
   processed/            committed cleaned data (parquet) + provenance
   raw/README.md         source URLs, access notes and manual download steps
 ui/                     rendering, Key facts, Evidence charts, follow-ups, setup
-scripts/                evaluation (eval_agent.py, measure_fast_path.py), CLI, data-spike probes
+scripts/                evaluation (eval_agent.py, measure_fast_path.py), CLI and LLM checks
 tests/                  offline unit and app tests
 docs/eval/              evaluation report and model comparison
+docs/data_validation.md source checks and KPI feasibility
 DESIGN.md               design, scoring methodology, AI usage, tradeoffs
 ```
 

@@ -175,6 +175,22 @@ def test_about_text_is_generated_from_config(frames):
     assert "Demo using public data. Not investment advice." in text
 
 
+@pytest.mark.parametrize("secrets,expected_key,voice", [
+    ({"GEMINI_API_KEY": "g-secret"}, "g-secret", False),                         # Gemini only: no voice
+    ({"GEMINI_API_KEY": "g-secret", "GROQ_API_KEY": "q-secret"}, "g-secret", True),
+    ({}, None, False),                                                           # neither: setup card
+])
+def test_keys_from_streamlit_secrets(monkeypatch, secrets, expected_key, voice):
+    """Streamlit Community Cloud: keys come only from st.secrets (no .env, no environment variables)."""
+    from ui import setup
+    for k in setup.SECRET_KEYS:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(setup, "load_dotenv", lambda *a, **kw: None)
+    monkeypatch.setattr(setup.st, "secrets", secrets)
+    assert setup.get_api_key() == expected_key
+    assert setup.voice_available() is voice
+
+
 @pytest.mark.parametrize("keys,expected", [
     ({"GEMINI_API_KEY": "g", "GROQ_API_KEY": "q"}, "Voice input and failover are **on**."),
     ({"GEMINI_API_KEY": "g"}, "Voice input and failover are **off** (no `GROQ_API_KEY`)."),
