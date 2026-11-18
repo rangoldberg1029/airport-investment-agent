@@ -81,6 +81,17 @@ def readable_time(stamp, tz_name: str | None, today=None) -> str | None:
     return text
 
 
+FEED_CODE_RE = re.compile(r"\s*\(\s*\.?\d+(?:\.\d+)?\s*\)")      # raw feed codes such as "(.308)"
+
+
+def clean_config(value) -> str | None:
+    """Runway configuration without raw feed codes: '28L/28R (.308)' -> '28L/28R'."""
+    if not value:
+        return None
+    text = re.sub(r"\s+", " ", FEED_CODE_RE.sub("", str(value))).strip(" ,;")
+    return text or None
+
+
 def _minutes(value) -> str | None:
     """92.0 -> '92 min'; '16 minutes' -> '16 min'."""
     if value in (None, ""):
@@ -125,8 +136,9 @@ def describe_event(event: dict, tz_name: str | None, today=None) -> str | None:
         until = readable_time(event.get("expTime"), tz_name, today)
         head = f"{name} in effect" + (f" until {until}" if until else "")
     elif kind == "airportConfig":
-        config = [f"arrival runways {event['arrivalRunwayConfig']}" if event.get("arrivalRunwayConfig") else None,
-                  f"departure runways {event['departureRunwayConfig']}" if event.get("departureRunwayConfig") else None,
+        arrivals, departures = clean_config(event.get("arrivalRunwayConfig")), clean_config(event.get("departureRunwayConfig"))
+        config = [f"arrival runways {arrivals}" if arrivals else None,
+                  f"departure runways {departures}" if departures else None,
                   f"arrival rate {event['arrivalRate']}/hour" if event.get("arrivalRate") else None]
         config = [c for c in config if c]
         if not config:

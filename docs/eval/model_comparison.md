@@ -1,8 +1,10 @@
 # Language models: choice and evaluation
 
 All runs use the same agent, tools, deterministic scoring and question script (`python scripts/eval_agent.py`):
-the 4 example questions plus 3 follow-ups in one conversation. Only free tiers are used. The full report of the
-evaluated configuration is [eval_results.md](eval_results.md).
+the 4 example questions plus 3 follow-ups in one conversation; the model comparison below is on these 7. The
+script also asks 3 out-of-scope questions, graded as refusals (clear scope statement, no invented numbers, an
+in-scope offer). Only free tiers are used. The full report of the evaluated configuration is
+[eval_results.md](eval_results.md).
 
 ## Configuration
 
@@ -43,7 +45,7 @@ quota is used up is skipped for the rest of the session. Without Groq, a 429 is 
   failover and voice.
 - **Model version.** `gemini-3.5-flash-lite` (07-2026) is the latest stable Flash-Lite in Google's models list
   (also listed: 3.1 stable, 3.1 preview, a "latest" alias). The list does not report function-calling support;
-  the eval confirms it (7/7 correct tool calls, see [eval_results.md](eval_results.md)).
+  the eval confirms it (7/7 correct tool calls and 3/3 helpful refusals, see [eval_results.md](eval_results.md)).
 - **Thinking level `minimal`**, the lowest, gives correct tool choices. No temperature is sent to Gemini 3
   (Google advises keeping its default).
 - **Server errors happen.** Gemini returned HTTP 503 during evaluation runs, which is why a 5xx is retried once

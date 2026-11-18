@@ -4,7 +4,9 @@ Pure functions: input = the tool-call records of one answer, output = 2-3 sugges
 the exact tool call that answers it, so a click runs the tool directly (fast path, no LLM tool choice).
 """
 
+import re
 from dataclasses import dataclass, field
+from typing import Iterable
 
 from agent.tools import ToolCallRecord
 from scoring.config import DEFAULT_LONG_HAUL_MI, LONG_HAUL_THRESHOLDS_MI
@@ -49,6 +51,8 @@ def from_rank(record: ToolCallRecord) -> list[Suggestion]:
     if ranking["ranking"]:
         top = ranking["ranking"][0]["airport"]
         out += [_profile(top), _unmet(top)]
+        if len(ranking["ranking"]) > 1:                      # backup if one of the above was already asked
+            out.append(_compare(top, ranking["ranking"][1]["airport"]))
     return out
 
 
@@ -58,13 +62,14 @@ def from_compare(record: ToolCallRecord) -> list[Suggestion]:
     lower, higher = ordered[0]["airport"], ordered[-1]["airport"]
     codes = [r["airport"] for r in rows]
     return [Suggestion(f"Why is {lower} lower?", "compare_congestion", {"airports": codes}),
-            _unmet(higher), _profile(lower)]
+            _unmet(higher), _profile(lower), _profile(higher), _unmet(lower)]
 
 
 def from_unmet(record: ToolCallRecord) -> list[Suggestion]:
     airport = record.envelope["data"]["unmet_demand"]["airport"]
     peer = _peer({airport})
-    return [_unmet(peer, f"What about {peer}?"), _profile(airport), _compare(airport, peer)]
+    return [_unmet(peer, f"What about {peer}?"), _profile(airport), _compare(airport, peer),
+            Suggestion(f"Are there FAA delays at {airport} right now?", "live_airport_status", {"airport": airport})]
 
 
 def from_long_haul(record: ToolCallRecord) -> list[Suggestion]:
@@ -72,7 +77,7 @@ def from_long_haul(record: ToolCallRecord) -> list[Suggestion]:
     other = min(LONG_HAUL_THRESHOLDS_MI) if d["default_threshold_mi"] == DEFAULT_LONG_HAUL_MI else DEFAULT_LONG_HAUL_MI
     return [Suggestion(f"What if long-haul starts at {other:,} miles?", "long_haul_share",
                        {"airport": d["airport"], "threshold_mi": other}),
-            _profile(d["airport"])]
+            _profile(d["airport"]), _unmet(d["airport"])]
 
 
 def from_profile(record: ToolCallRecord) -> list[Suggestion]:
@@ -83,24 +88,31 @@ def from_profile(record: ToolCallRecord) -> list[Suggestion]:
 
 def from_live(record: ToolCallRecord) -> list[Suggestion]:
     airport = record.envelope["data"]["airport"]
-    return [_profile(airport), _unmet(airport)]
+    return [_profile(airport), _unmet(airport), _compare(airport, _peer({airport}))]
 
 
 RULES = {"rank_airports": from_rank, "compare_congestion": from_compare, "unmet_demand": from_unmet,
          "long_haul_share": from_long_haul, "get_airport_profile": from_profile, "live_airport_status": from_live}
 
 
-def suggestions(records: list[ToolCallRecord]) -> list[Suggestion]:
-    """2-3 follow-ups based on the last successful tool call (empty if none applies)."""
+def normalize(question: str) -> str:
+    """'Why is SNA lower?' == 'why is sna lower': lower-case, single spaces, no trailing punctuation."""
+    return re.sub(r"\s+", " ", question.strip().lower()).rstrip(" ?.!")
+
+
+def suggestions(records: list[ToolCallRecord], asked: Iterable[str] = ()) -> list[Suggestion]:
+    """Up to 3 follow-ups based on the last successful tool call, never repeating a question already asked in
+    this conversation (`asked`). Empty if none applies."""
+    done = {normalize(q) for q in asked}
     for record in reversed(records or []):
         rule = RULES.get(record.name)
         if record.error or rule is None:
             continue
         try:
-            out, seen = [], set()
+            out, seen = [], set(done)
             for s in rule(record):
-                if s.question not in seen:
-                    seen.add(s.question)
+                if normalize(s.question) not in seen:
+                    seen.add(normalize(s.question))
                     out.append(s)
             return out[:MAX_SUGGESTIONS]
         except (KeyError, TypeError, IndexError, StopIteration):

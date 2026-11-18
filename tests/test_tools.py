@@ -192,5 +192,5 @@ def test_llm_view_size_cap(frames, name, args):
 
 def test_prompt_and_schemas_size_cap():
     from agent.prompts import SYSTEM_PROMPT
-    assert len(SYSTEM_PROMPT) / 4 <= 450
+    assert len(SYSTEM_PROMPT) / 4 <= 525        # ~500 tokens incl. the two-sentence refusal rule
     assert len(json.dumps(TOOL_SCHEMAS, separators=(",", ":"))) / 4 <= 850

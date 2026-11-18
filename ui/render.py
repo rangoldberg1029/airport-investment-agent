@@ -145,9 +145,10 @@ def render_evidence(records: list[ToolCallRecord]) -> None:
             st.caption("**Caveats:**\n" + "\n".join(f"- {c}" for c in env["caveats"]))
 
 
-def render_followups(records: list[ToolCallRecord], key: str, on_followup) -> None:
-    """2-3 suggested follow-up questions as small buttons; a click calls on_followup(question, tool, args)."""
-    items = suggestions(records)
+def render_followups(records: list[ToolCallRecord], key: str, on_followup, asked=()) -> None:
+    """Up to 3 suggested follow-up questions as small buttons, none already asked in this conversation (`asked`);
+    a click calls on_followup(question, tool, args)."""
+    items = suggestions(records, asked)
     if not items:
         return
     cols = st.columns(len(items))
@@ -201,9 +202,10 @@ def why_markdown(message: dict) -> str:
 
 
 def render_assistant(message: dict, frame: AnswerFrame | None = None, key: str | None = None,
-                     on_followup=None) -> None:
+                     on_followup=None, asked=()) -> None:
     """A stored answer in its frame: status line, computed Answer line, Why / drivers + check notices, Key facts
-    and Evidence, and follow-up buttons (only when `key` and `on_followup` are given: the latest answer)."""
+    and Evidence, and follow-up buttons (only when `key` and `on_followup` are given: the latest answer; never a
+    question in `asked`)."""
     frame = frame or AnswerFrame.create()
     with frame.status.container():
         if message.get("cached"):
@@ -222,7 +224,7 @@ def render_assistant(message: dict, frame: AnswerFrame | None = None, key: str |
         render_details(records)
     if key is not None and on_followup is not None and not message.get("error"):
         with frame.followups.container():
-            render_followups(records, key, on_followup)
+            render_followups(records, key, on_followup, asked)
     else:
         frame.followups.empty()
 

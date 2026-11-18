@@ -235,15 +235,20 @@ One line of reasoning per decision. Values live in `scoring/config.py`; change t
   result ("which is third now?") gets a note to ask a clarifying question; a ranking without scope then says
   "No previous ranking in this conversation; showing the national ranking."
 - **Live FAA status is summarized in words.** Event types decoded ("WX:Wind" → "Weather: wind"), times in UTC
-  and the airport's local time (state → time zone, `scoring/config.py`), empty events never shown.
-- **Prompt rules frozen (`PROMPT_VERSION`), except one sign rule for the bullets:** a component drives a
-  score UP only if its contribution is positive; never call negative growth a driver; use "raises X" /
-  "lowers X". Further tuning gave diminishing returns; the remaining limits are mitigated in the UI.
+  and the airport's local time (state → time zone, `scoring/config.py`), raw feed codes such as "(.308)"
+  removed from runway configurations, empty events never shown.
+- **Refusals are helpful.** An out-of-scope answer has at most 2 sentences: what is out of scope and why, then
+  one concrete in-scope offer using the question's US airports ("JFK is in scope - I can show its profile or
+  compare it with other US airports"). The eval checks this on 3 out-of-scope questions.
+- **Prompt rules frozen (`PROMPT_VERSION`), except the bullet sign rule and the refusal rule:** a component
+  drives a score UP only if its contribution is positive; never call negative growth a driver; use "raises X" /
+  "lowers X". Further tuning gave diminishing returns; the remaining limits are mitigated in the UI. The prompt
+  is ~500 tokens (test cap 525).
 
 ### Models (details and numbers: `docs/eval/model_comparison.md`, eval report: `docs/eval/eval_results.md`)
 - **Language model `gemini-3.5-flash-lite` (Google AI Studio free tier, thinking `minimal`).** ~250K tokens/min
-  means no pacing waits; latest stable Flash-Lite in Google's models list; 7/7 tool choice, 0 grounding
-  failures, 0 untraceable numbers in the eval.
+  means no pacing waits; latest stable Flash-Lite in Google's models list. Eval (10 questions): 7/7 correct
+  tool choices, 3/3 helpful refusals, 0 grounding failures, 0 untraceable numbers.
 - **One required key, one optional.** `GEMINI_API_KEY` is required. `GROQ_API_KEY` adds voice input and
   failover to `openai/gpt-oss-120b`; without it, everything except voice works, with no failover (sidebar:
   "Voice input requires GROQ_API_KEY"). Only `GROQ_API_KEY` set → the app runs on Groq alone. Neither → the
@@ -278,7 +283,8 @@ One line of reasoning per decision. Values live in `scoring/config.py`; change t
 - **Example questions appear in one place.** They are cards on the empty state and in the sidebar once a
   conversation exists, so they are never shown twice.
 - **Follow-up suggestions are deterministic.** They are based on the last successful tool call, with at
-  most 3 and none after errors. They are guaranteed to be answerable.
+  most 3 and none after errors, and never repeat a question already asked in the conversation (backup
+  suggestions fill the slot). They are guaranteed to be answerable.
 - **Human-readable everywhere.** Key facts and the LLM's input use labels, not snake_case; magnitudes are
   positive with direction words; the "Shown but not ranked" list stops at 5 ("and N more").
 - **Light theme with a viewer toolbar.** It is a clean demo for analysts.

@@ -143,6 +143,11 @@ if empty_state:
                           args=(q, *EXAMPLE_CALLS[i]))
 
 # ---------------------------------------------------------------- history
+def asked_questions() -> list[str]:
+    """Questions already asked in this conversation: never suggested again as follow-ups."""
+    return [m["text"] for m in st.session_state.messages if m["role"] == "user"]
+
+
 # Follow-up buttons only under the latest answer, and not while a new answer is loading (each element once).
 messages = st.session_state.messages
 last_answer = max((i for i, m in enumerate(messages) if m["role"] == "assistant"), default=None)
@@ -152,7 +157,8 @@ for idx, message in enumerate(messages):
             st.markdown(message["text"])
         else:
             latest = idx == last_answer and not busy
-            render_assistant(message, key=f"msg{idx}" if latest else None, on_followup=ask_later if latest else None)
+            render_assistant(message, key=f"msg{idx}" if latest else None, on_followup=ask_later if latest else None,
+                             asked=asked_questions())
 
 # ---------------------------------------------------------------- new question
 st.chat_input("Ask about US airport demand, congestion or expansion candidates", disabled=not api_key,
@@ -223,7 +229,7 @@ if busy:
         st.session_state.messages.append(message)
         idx = len(st.session_state.messages) - 1
         if cached is not None:
-            render_assistant(message, frame, key=f"msg{idx}", on_followup=ask_later)
+            render_assistant(message, frame, key=f"msg{idx}", on_followup=ask_later, asked=asked_questions())
         elif not message["error"]:
             with frame.followups.container():
-                render_followups(message["records"], f"msg{idx}", ask_later)
+                render_followups(message["records"], f"msg{idx}", ask_later, asked_questions())

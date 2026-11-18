@@ -343,3 +343,59 @@ def test_whisper_prompt_has_domain_vocabulary():
     from agent.speech import PROMPT
     for term in ("unmet demand", "load factor", "congestion", "New England", "terminal expansion", "SNA", "BDL"):
         assert term in PROMPT
+
+
+# ---------------------------------------------------------------- polish: refusals, follow-ups, live codes
+
+def test_refusal_rule_asks_for_reason_and_in_scope_offer():
+    from agent.prompts import SYSTEM_PROMPT
+    rule = next(line for line in SYSTEM_PROMPT.splitlines() if line.startswith("3. Out of scope"))
+    assert "max 2 sentences" in SYSTEM_PROMPT and "in-scope offer" in SYSTEM_PROMPT
+    assert rule.startswith("3. Out of scope: non-US airports, construction costs")
+
+
+def test_follow_ups_never_repeat_an_asked_question(frames):
+    from ui.followups import suggestions
+    rank = execute_tool("rank_airports", {"states": ["MA", "CT"]}, frames)
+    top = rank.envelope["data"]["ranking"]["ranking"][0]["airport"]
+    asked = ["Which airports rank highest?", f"show the profile of {top}"]     # case / punctuation ignored
+    questions = [s.question for s in suggestions([rank], asked)]
+    assert f"Show the profile of {top}" not in questions and len(questions) == 3     # a backup fills the slot
+    assert questions[-1].startswith(f"Compare {top} and ")
+
+
+def test_app_does_not_suggest_the_question_just_asked(app):
+    from tests.test_app import ScriptedLLM
+    at, _ = app(ScriptedLLM("- CCC leads."))
+    at.chat_input[0].set_value("Show the profile of CCC").run()       # the fake LLM ranks MA/CT (top: CCC)
+    labels = [b.label for b in at.button if b.key and "_followup_" in b.key]
+    assert labels and "Show the profile of CCC" not in labels
+
+
+def test_live_config_drops_raw_feed_codes():
+    from data.sources.nas_status import clean_config
+    assert clean_config("28L/28R (.308)") == "28L/28R"
+    assert clean_config("19L INTRAIL (.25), 28R") == "19L INTRAIL, 28R"
+    line = describe_event({"type": "airportConfig", "arrivalRunwayConfig": "28L, 28R (.308)",
+                           "departureRunwayConfig": "1L, 1R", "arrivalRate": 36}, None)
+    assert line == "Airport configuration: arrival runways 28L, 28R, departure runways 1L, 1R, arrival rate 36/hour"
+
+
+class _Result:
+    """Minimal TurnResult stand-in for the eval's refusal grading."""
+
+    def __init__(self, text, explanation=None, untraceable=(), records=()):
+        self.text, self.explanation = text, explanation or text
+        self.untraceable_numbers, self.tool_calls = list(untraceable), list(records)
+        self.error, self.grounding_issues = None, []
+
+
+def test_eval_refusal_grading():
+    from scripts.eval_agent import grade_refusal
+    good = _Result("Construction costs are out of scope because the data covers traffic, not finance. BOS is in "
+                   "scope - I can show its profile or compare it with other US airports.")
+    assert grade_refusal(good, ("BOS", "Boston"))[0]
+    assert not grade_refusal(_Result("Out of scope: construction costs."), ("BOS",))[0]          # no offer
+    assert not grade_refusal(_Result("BOS will cost $2 billion. I can show its profile."), ("BOS",))[0]
+    invented = _Result(good.text, untraceable=[{"value": "$2 billion", "context": ""}])
+    assert grade_refusal(invented, ("BOS",)) == (False, "invented numbers: $2 billion")
