@@ -5,7 +5,7 @@ import math
 import time
 
 ANALYZING = "Analyzing question..."
-COMPOSING = "Composing answer..."
+COMPOSING = "Facts ready · writing explanation…"
 RETRYING = "Answer failed the grounding check - retrying with a tool call..."
 
 

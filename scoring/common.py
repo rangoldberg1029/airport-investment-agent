@@ -6,7 +6,7 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
-from scoring.config import AIRPORT_ALIASES, REGIONS
+from scoring.config import AIRPORT_ALIASES, NON_US_AIRPORTS, REGIONS
 
 Month = tuple[int, int]
 Window = tuple[Month, Month]
@@ -75,12 +75,33 @@ def window_label(window: Window) -> str:
 
 # ---------------------------------------------------------------- name resolution
 
+class OutOfScopeAirport(ValueError):
+    """A known airport outside the US scope (e.g. LHR): the answer is a clear scope statement, not 'unknown'."""
+
+
+def out_of_scope_airport(key: str) -> str | None:
+    """'LHR London Heathrow Airport is outside the US scope ...' for known non-US airports / cities, else None."""
+    if key.upper() in NON_US_AIRPORTS:
+        hits = [key.upper()]
+    else:
+        hits = [code for code, (name, city) in NON_US_AIRPORTS.items() if key in (city, name.lower())]
+    if not hits:
+        return None
+    names = " / ".join(f"{code} {NON_US_AIRPORTS[code][0]}" for code in hits)
+    verb = "is" if len(hits) == 1 else "are"
+    return f"{names} {verb} outside the US scope: this agent covers US commercial airports only."
+
+
 def resolve_airport(name: str, airports: pd.DataFrame) -> tuple[str, str | None]:
-    """Return (IATA, assumption-or-None). Order: IATA code, alias map, exact city/name match."""
+    """Return (IATA, assumption-or-None). Order: IATA code, alias map, exact city/name match.
+    Known non-US airports raise OutOfScopeAirport."""
     key = name.strip().lower().replace(".", "")
     codes = set(airports["iata"])
     if key.upper() in codes:
         return key.upper(), None
+    scope = out_of_scope_airport(key)
+    if scope:
+        raise OutOfScopeAirport(scope)
     if key in AIRPORT_ALIASES:
         iata, alternatives = AIRPORT_ALIASES[key]
         if alternatives:

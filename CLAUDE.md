@@ -192,29 +192,50 @@ One line of reasoning per decision. Values live in `scoring/config.py`; change t
   is explainable.
 - **7 bundled tools, so each example question needs one tool call.** Fewer round trips mean fewer tokens and
   faster answers on free tiers.
-- **Compact LLM views; the full envelope goes to the UI.** These use short source ids, units on every value,
-  precomputed signed differences, ranked drivers, interpretation strings, headlines and official airport
-  names, so the LLM restates rather than calculates.
-- **Memory = last 6 exchanges.** Older answers are truncated to 300 characters, and tool messages are kept only for
-  the latest turn. This keeps follow-ups working within the token budget.
-- **Lowest reasoning level that works (Gemini `minimal`, Groq `low`), max 1,000 output tokens per call.**
-  Fewer hidden tokens, same eval quality.
+- **Compact, readable LLM views; the full envelope goes to the UI.** Short source ids, units on every value
+  (load factors as plain ratios, indices as "/ 100"), no snake_case (component labels, readable keys),
+  differences as positive magnitudes with direction words ("NAS share raises SNA by 4.22 pts"), ranked
+  drivers, interpretation strings, headlines and official airport names, so the LLM restates rather than
+  calculates.
+- **Rankings explain themselves.** Per-airport score drivers for the top 3 (weight × (percentile − 50): how much
+  each component raises or lowers the score vs a median hub) and, for non-default presets, each airport's rank
+  change vs the balanced preset ("BDL: 2 → 3 (down)") so a wrong premise ("why did it move up?") is corrected.
+- **One tool round, then a streamed explanation.** The LLM chooses the tools (several in parallel are fine);
+  as soon as they ran, the Answer line, Key facts and Evidence are shown; one more call (tool_choice "none")
+  streams the bullets token by token. The checks run when the stream ends; a failed grounding check replaces
+  the bullets with the retried version. A bullet cut off mid-sentence (output limit / stream ended) is dropped.
+- **Memory = last 6 exchanges as text; earlier tool outputs are not resent.** Each earlier answer carries a
+  one-line summary of its tool calls; answers older than the latest are truncated to 300 characters. Prompt
+  size stays flat as a conversation grows (eval: turn 1 4,256 tokens, turn 5 4,882).
+- **Lowest reasoning level that works (Gemini `minimal`, Groq `low`); max output 2,000 tokens for Gemini
+  (its thinking counts toward the limit), 1,000 for Groq.** Fewer hidden tokens, same eval quality.
 - **Pacing from the provider's rate-limit headers when sent (Groq; cached tokens don't count), else a local
   per-minute window of tokens and requests (Gemini); without failover, 429 retries are capped at 30 s.**
   Avoids most 429s; bounded waits.
 - **Deterministic Answer line + LLM "Why / drivers" bullets (max 4).** Code builds the core answer from the tool
-  output (`agent/headlines.py`), so rank order, names, which index is higher, shares and scores are always
-  correct; the number and grounding checks run on the LLM part.
+  output (`agent/headlines.py`), so rank order, names, which index is higher, shares, scores, the weight preset
+  and live FAA events are always correct; the number and grounding checks run on the LLM part. "Why is X
+  lower/higher?" gets its own Answer line built from the ranked contribution differences (and corrects a wrong
+  premise).
 - **Fast path for example cards and suggested follow-ups.** The tool and its arguments are known: the tool
-  runs directly, Key facts and Evidence show in under 0.25 s, then one LLM call writes the bullets (about 5-10 s
-  in the eval). The call is recorded in the conversation like an LLM-chosen one, so follow-ups keep their context.
+  runs directly, Key facts and Evidence show in under 0.25 s, then one streamed LLM call writes the bullets.
+  The call is recorded in the conversation like an LLM-chosen one and counts as the turn's tool call for the
+  grounding check, so follow-ups keep their context.
 - **Number traceability check across all turns.** Every number in an answer must trace to a tool output
   (envelope or LLM view); follow-ups may cite earlier turns.
-- **Grounding check.** Airport codes must be grounded, the answer must not claim tools that were not called,
-  and rank/compare/compute/weight requests need a tool call. If the check fails, there is one retry with
-  `tool_choice="required"`. This fixed the invented re-rank answer.
+- **Grounding check.** Airport codes must be grounded; the answer must not claim a tool that was not called
+  (its identifier or "<name> tool"; plain topic words like "unmet demand" are not claims); rank/compare/
+  compute/weight requests need a tool call unless the answer is a clear scope refusal. If the check fails,
+  there is one retry with `tool_choice="required"` (fast path: same tool output, new explanation).
+- **Scope: known non-US airports get a clear answer.** The 40 largest non-US destinations in the T-100 data
+  (plus a few hubs) are listed in `scoring/config.py`; asking about one (code or city) returns "LHR London
+  Heathrow Airport is outside the US scope" as the Answer line instead of "unknown airport".
 - **Follow-up context: the last tool call and its arguments are injected into the user message.** This lets
-  "rank them again…" re-call the tool with the right region.
+  "rank them again…" re-call the tool with the right region. A follow-up-style question with no earlier
+  result ("which is third now?") gets a note to ask a clarifying question; a ranking without scope then says
+  "No previous ranking in this conversation; showing the national ranking."
+- **Live FAA status is summarized in words.** Event types decoded ("WX:Wind" → "Weather: wind"), times in UTC
+  and the airport's local time (state → time zone, `scoring/config.py`), empty events never shown.
 - **Prompt rules frozen (`PROMPT_VERSION`), except one sign rule for the bullets:** a component drives a
   score UP only if its contribution is positive; never call negative growth a driver; use "raises X" /
   "lowers X". Further tuning gave diminishing returns; the remaining limits are mitigated in the UI.
@@ -241,16 +262,28 @@ One line of reasoning per decision. Values live in `scoring/config.py`; change t
 ### UI
 - **Streamlit with Altair charts.** Key facts and Evidence are built from the tool outputs, not from the LLM
   text, so the numbers on screen are deterministic.
-- **First-question answer cache only.** It is keyed by question, model, prompt version and data build date,
-  and stored only when an answer has no error, no untraceable numbers and no grounding issues. The demo
-  questions answer instantly without spending quota.
+- **First-question answer cache only.** It is keyed by question, model, prompt version and data build date
+  (a new `PROMPT_VERSION` invalidates it; it lives in memory, so a restart clears it), and stored only when an
+  answer has no error, needed no retry and passed every check. The demo questions answer instantly without
+  spending quota.
+- **Progressive answers.** Answer line, Key facts and Evidence appear as soon as the tool ran (card click
+  ~0.03-0.2 s; typed question ~1 s); the status line says "Facts ready · writing explanation…" and a small
+  spinner sits where the bullets will appear; the bullets then stream in.
+- **Each element is rendered once.** Every answer uses one fixed frame of slots (status, Answer, Why / drivers,
+  Key facts + Evidence, follow-ups) live and in history, so a rerun replaces elements in place. The welcome
+  cards sit in one placeholder that is emptied as soon as a question is submitted from any path (typed, card,
+  follow-up, sidebar, voice); follow-up buttons appear only under the latest answer and not while a new answer
+  loads.
 - **Example questions appear in one place.** They are cards on the empty state and in the sidebar once a
   conversation exists, so they are never shown twice.
 - **Follow-up suggestions are deterministic.** They are based on the last successful tool call, with at
   most 3 and none after errors. They are guaranteed to be answerable.
+- **Human-readable everywhere.** Key facts and the LLM's input use labels, not snake_case; magnitudes are
+  positive with direction words; the "Shown but not ranked" list stops at 5 ("and N more").
 - **Light theme with a viewer toolbar.** It is a clean demo for analysts.
-- **Voice is beta and needs `GROQ_API_KEY`.** It uses Whisper on Groq, and the transcript can be edited
-  before sending so airport codes can be fixed.
+- **Voice is beta and needs `GROQ_API_KEY`.** It uses Whisper on Groq with a domain vocabulary prompt (unmet
+  demand, load factor, congestion, New England, terminal expansion, airport codes); the transcript can be
+  edited before sending and is cleared after Send.
 - **The About panel and sidebar describe the active setup** (language model, failover on/off, voice on/off),
   generated from the configuration so they cannot go stale.
 - **The DuckDB file is built automatically (offline) on first run, and the keys are read from `.env` or

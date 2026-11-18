@@ -27,11 +27,13 @@ class ScriptedLLM:
     def set_sleep(self, sleep):
         pass
 
-    def complete(self, messages, tools, tool_choice="auto"):
+    def complete(self, messages, tools, tool_choice="auto", on_token=None):
         self.round += 1
         ScriptedLLM.calls += 1
         if messages[-1]["role"] == "user" and tool_choice != "none":
             return LLMResponse("", [ToolCall(f"c{self.round}", "rank_airports", '{"states": ["MA", "CT"]}')], 100)
+        if on_token:
+            on_token(self.answer)
         return LLMResponse(self.answer, [], 50)
 
 
@@ -170,7 +172,7 @@ class InventingLLM:
     def set_sleep(self, sleep):
         pass
 
-    def complete(self, messages, tools, tool_choice="auto"):
+    def complete(self, messages, tools, tool_choice="auto", on_token=None):
         return LLMResponse("SFO falls to rank 3. Used the rank_airports tool.", [], 10)
 
 

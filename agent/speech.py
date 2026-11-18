@@ -6,8 +6,10 @@ import os
 from agent.llm import GROQ_BASE_URL
 
 TRANSCRIPTION_MODEL = "whisper-large-v3-turbo"
-PROMPT = ("US airports and IATA codes, e.g. LAX, SNA, SFO, BOS, ANC, JFK; New England; "
-          "load factor; congestion; terminal expansion.")   # vocabulary hint for Whisper
+# Vocabulary hint for Whisper: domain terms and airport codes it would otherwise mishear.
+PROMPT = ("Airport investment questions: unmet demand, load factor, congestion, New England, terminal expansion, "
+          "long-haul, capacity, delays, ranking, growth. Airport codes: LAX, SNA, SFO, BOS, ANC, JFK, ORD, ATL, "
+          "DEN, SEA, BDL, PWM, PVD, BTV, MHT, HVN, OAK, SJC.")
 
 
 def voice_available() -> bool:

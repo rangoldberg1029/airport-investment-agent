@@ -210,7 +210,7 @@ def test_gemini_request_uses_default_temperature_and_max_tokens():
     client = client_with(gemini(stub))
     client.complete(HI, tools=[{"type": "function"}], tool_choice="none")
     kwargs = stub.calls[0]
-    assert "temperature" not in kwargs and kwargs["max_tokens"] == client.max_output_tokens
+    assert "temperature" not in kwargs and kwargs["max_tokens"] == 2000           # thinking counts toward it
     assert kwargs["reasoning_effort"] == "minimal" and kwargs["tool_choice"] == "none"
 
 

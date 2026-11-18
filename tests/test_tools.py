@@ -8,7 +8,11 @@ from agent.tools import TOOL_SCHEMAS, TOOLS, execute_tool, shorten
 
 
 def view(record) -> dict:
-    return json.loads(record.llm_view)
+    """The LLM's JSON, with "data" replaced by the structured view (code-friendly keys)."""
+    out = json.loads(record.llm_view)
+    if record.view and "data" in out:
+        out["data"] = record.view
+    return out
 
 
 def test_schemas_match_dispatch_table():
@@ -20,8 +24,8 @@ def test_profile_bundles_kpis_and_precomputed_differences(frames):
     d = view(r)["data"]
     assert r.error is None and d["airport"] == "AAA"
     assert d["delay_rate"] == "20.0%" and d["national"]["delay_rate"] == "16.25%"   # (20+10+30+5)/400
-    assert d["delay_rate_minus_national"] == "+3.75 pp"
-    assert d["load_factor_avg"].endswith(" LF") and d["growth_yoy"].endswith("%")
+    assert d["delay_rate_vs_national"] == "3.75 pp above national"
+    assert float(d["load_factor_avg"]) < 1 and d["growth_yoy"].endswith("%")      # load factor = plain ratio
     assert d["commercial_runways"] == "2 runways" and d["investment_score"].endswith("/ 100")
     assert set(r.envelope) == {"data", "sources", "data_period", "assumptions", "caveats"}
 
@@ -29,14 +33,36 @@ def test_profile_bundles_kpis_and_precomputed_differences(frames):
 def test_compare_congestion_has_differences_for_every_metric(frames):
     r = execute_tool("compare_congestion", {"airports": ["AAA", "BBB"]}, frames)
     d = view(r)["data"]
-    diffs = d["differences"]["AAA_minus_BBB"]
+    diffs = d["differences"]["AAA vs BBB"]
     assert d["values"]["delay_rate"] == {"AAA": "20.0%", "BBB": "10.0%"}
-    assert diffs["delay_rate"] == "+10.0 pp" and diffs["commercial_runways"] == "-2 runways"
-    assert all(v.startswith(("+", "-", "0")) for v in diffs.values())        # every difference is signed
-    drivers = d["drivers_of_index_difference"]["AAA_vs_BBB"]
-    assert len(drivers["ranked"]) == 4 and "raises" in drivers["ranked"][0]
+    assert diffs["delay_rate"] == "AAA higher by 10.0 pp" and diffs["commercial_runways"] == "BBB higher by 2 runways"
+    assert all(" higher by " in v or v == "equal" for v in diffs.values())    # magnitude + direction words
+    drivers = d["drivers_of_index_difference"]["AAA vs BBB"]
+    assert len(drivers["ranked"]) == 4 and " raises " in drivers["ranked"][0] and " by " in drivers["ranked"][0]
+    assert "-" not in " ".join(drivers["ranked"])                              # no signed numbers
     assert "Largest single driver" in drivers["summary"]
     assert d["runway_lengths_ft_excluded_short"]["AAA"] == [2500]
+
+
+@pytest.mark.parametrize("name,args", [
+    ("get_airport_profile", {"airport": "AAA"}), ("rank_airports", {"states": ["MA", "CT"], "preset": "growth-led"}),
+    ("compare_congestion", {"airports": ["AAA", "BBB"]}), ("unmet_demand", {"airport": "AAA"}),
+])
+def test_llm_view_is_human_readable(frames, name, args):
+    text = execute_tool(name, args, frames).llm_view
+    for snake in ("nas_share", "delay_rate", "ops_per_runway", "lf_avg", "growth_yoy", "natl_rank", "pctile",
+                  "demand_pressure", "_minus_", " LF"):
+        assert snake not in text, snake
+
+
+def test_rank_view_explains_scores_and_rank_changes(frames):
+    d = view(execute_tool("rank_airports", {"states": ["MA", "CT"], "preset": "growth-led"}, frames))["data"]
+    top = d["rows"][0][1]
+    drivers = d["score_drivers"][top]
+    assert drivers and all(("raises" in s or "lowers" in s) and "vs a median hub" in s for s in drivers)
+    assert all(c.split(": ")[1].split(" (")[1].rstrip(")") in ("up", "down", "same") for c in d["rank_change_vs_balanced"])
+    default = view(execute_tool("rank_airports", {"states": ["MA", "CT"]}, frames))["data"]
+    assert "rank_change_vs_balanced" not in default                          # balanced is the reference
 
 
 def test_compare_congestion_needs_two_airports(frames):
@@ -48,7 +74,7 @@ def test_rank_airports_weights_override_and_stability(frames):
     r = execute_tool("rank_airports", {"states": ["MA", "CT"], "weights": {"growth": 0.6}}, frames)
     d = view(r)["data"]
     assert d["weights"]["growth"] == pytest.approx(0.6 / 1.35, abs=1e-3)
-    assert d["rows"][0][-1] is not None                      # gap_to_next precomputed
+    assert d["rows"][0][-1].endswith("pts ahead of the next airport")       # gap to next precomputed
     assert "stability_top3" in d
     assert any("User-overridden" in a for a in r.envelope["assumptions"])
 
@@ -79,7 +105,8 @@ def test_unmet_demand_drivers_include_difference_to_median(frames):
     d = view(execute_tool("unmet_demand", {"airport": "AAA"}, frames))["data"]
     assert d["drivers_above_peer_median"]
     for comp, value, median, delta, _ in d["drivers_above_peer_median"]:
-        assert delta.startswith("+")                         # drivers are above the median
+        assert delta.endswith("above the median")            # drivers are above the median
+        assert "_" not in comp                               # readable component names
     assert "independent of load factor" in d["component_meanings"]["completion_gap"]
     assert "do not cause" in d["note"]
     assert set(d["capacity_gap_interpretation"]) == {"target_0.85", "target_0.80"}
@@ -90,7 +117,7 @@ def test_unmet_view_leads_with_capacity_gap_headline(frames):
     d = view(execute_tool("unmet_demand", {"airport": "AAA"}, frames))["data"]
     assert list(d)[0] == "headline"
     h = d["headline"]
-    assert "at target LF 0.85: 12-month window" in h and "at target LF 0.80: 12-month window" in h
+    assert "at target load factor 0.85: 12-month window" in h and "at target load factor 0.80: 12-month window" in h
     assert h.count("peak month 2026-07") == 2                   # both targets cover both periods
 
 
@@ -103,7 +130,7 @@ def test_percentiles_have_one_decimal(frames):
 def test_compare_congestion_states_directions(frames):
     d = view(execute_tool("compare_congestion", {"airports": ["AAA", "BBB"]}, frames))["data"]
     text = " ".join(d["interpretation"])
-    assert "AAA_minus_X > 0 means AAA is higher" in text
+    assert "use drivers_of_index_difference" in text
     assert "RAISES operations per runway" in text
 
 
@@ -116,6 +143,15 @@ def test_live_status_no_events_is_not_an_error(frames):
     assert data["feed_timestamp"] == "Wed Nov 18 12:00:00 2026 GMT" and "feed updated" in env["data_period"]
     env, data = live_airport_status(frames, "BBB", fetch=fake)
     assert data["events"] == [{"type": "groundStop", "reason": "weather"}]
+    assert data["event_descriptions"] == ["Ground stop; reason: weather"]
+
+
+def test_known_non_us_airport_is_out_of_scope(frames):
+    for args in ({"airport": "LHR"}, {"airport": "London"}):
+        r = execute_tool("unmet_demand", args, frames)
+        assert r.error.startswith("LHR London Heathrow Airport") and "outside the US scope" in r.error
+        assert r.meta["out_of_scope"] and "do not retry" in view(r)["hint"]
+    assert "unknown airport" in execute_tool("unmet_demand", {"airport": "Atlantis"}, frames).error
 
 
 def test_live_status_feed_failure(frames):

@@ -3,7 +3,7 @@
 PROMPT_VERSION is part of the answer-cache key: bump it whenever the prompt or answer format changes.
 """
 
-PROMPT_VERSION = "2026-11-18.6"
+PROMPT_VERSION = "2026-11-18.7"
 
 SYSTEM_PROMPT = """You are an investment analyst assistant for US airports. You help investors find airports \
 where terminal/capacity expansion is most likely to pay off, based on demand vs capacity.

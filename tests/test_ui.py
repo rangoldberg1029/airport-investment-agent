@@ -27,7 +27,8 @@ def test_key_facts_come_from_tool_outputs(records):
     facts = key_facts(list(records.values()))
     text = "\n".join(facts)
     assert "investment score" in text and "Top 3 is" in text
-    assert "Why the indices differ (AAA minus BBB" in text and "RAISES operations per runway" in text
+    assert "Why the indices differ (AAA vs BBB" in text and "RAISES operations per runway" in text
+    assert "raises AAA by" in text and " is changes " not in text
     assert "23.08% of 156 passenger departures fly 3,000 statute miles or more" in text
     assert "unmet-demand proxy score" in text
     assert "Capacity gap at target load factor 0.85: 12-month window" in text and "peak month 2026-07" in text

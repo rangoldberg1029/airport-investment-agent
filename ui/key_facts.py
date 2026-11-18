@@ -4,8 +4,6 @@ Pure functions. Text comes from the tool envelopes (produced by Python code), ne
 Labels are human-readable and every value carries its unit.
 """
 
-import json
-
 from agent.tools import ToolCallRecord, contribution_differences, weights_label
 
 LABELS = {
@@ -38,10 +36,10 @@ def value_text(component: str, value) -> str:
 
 
 def _view(record: ToolCallRecord) -> dict:
-    try:
-        return json.loads(record.llm_view).get("data", {})
-    except (json.JSONDecodeError, AttributeError):
-        return {}
+    return record.view or {}
+
+
+MAX_UNRANKED = 5      # "Shown but not ranked": list at most this many, then "and N more"
 
 
 def _gap_line(target: str, entry: dict) -> str:
@@ -58,7 +56,8 @@ def _gap_line(target: str, entry: dict) -> str:
 def facts_rank(record: ToolCallRecord) -> list[str]:
     ranking = record.envelope["data"]["ranking"]
     stab = record.envelope["data"]["stability"]
-    out = [f"Weights: {weights_label(ranking['weights'])}"]
+    weights = weights_label(ranking["weights"])
+    out = [weights[:1].upper() + weights[1:]]
     for r in ranking["ranking"][:3]:
         raw = {c["component"]: c["raw_value"] for c in r["components"]}
         out.append(f"#{r['rank']} {r['airport']} ({r['state']}, {r['hub']}): investment score "
@@ -67,12 +66,19 @@ def facts_rank(record: ToolCallRecord) -> list[str]:
                    f"congestion index {raw['congestion']} / 100)")
     if not ranking["ranking"]:
         out.append("No airport in this selection is in the ranking universe (FAA large/medium/small hubs).")
+    changes = record.envelope["data"].get("rank_change_vs_balanced")
+    if changes:
+        moved = [c for c in changes if not c.endswith("(same)")]
+        out.append("Rank change vs the balanced preset: "
+                   + ("; ".join(c.replace(" -> ", " → ") for c in moved) if moved else "no changes"))
     presets = "; ".join(f"{k}: {', '.join(v)}" for k, v in stab["rankings"].items())
-    verdict = "the same under all weight presets" if stab["same_top_n_set"] else "changes with the weights"
-    out.append(f"Top {stab['top_n']} is {verdict} ({presets})")
-    if ranking["outside_ranking_universe"]:
-        names = ", ".join(f"{o['airport']} ({o['passengers']:,} passengers)" for o in ranking["outside_ranking_universe"])
-        out.append(f"Shown but not ranked (FAA non-hubs): {names}")
+    verdict = "is the same under all weight presets" if stab["same_top_n_set"] else "changes with the weight presets"
+    out.append(f"Top {stab['top_n']} {verdict} ({presets})")
+    outside = ranking["outside_ranking_universe"]
+    if outside:
+        names = ", ".join(f"{o['airport']} ({o['passengers']:,} passengers)" for o in outside[:MAX_UNRANKED])
+        more = f", and {len(outside) - MAX_UNRANKED} more" if len(outside) > MAX_UNRANKED else ""
+        out.append(f"Shown but not ranked (FAA non-hubs): {names}{more}")
     return out
 
 
@@ -85,8 +91,8 @@ def facts_compare(record: ToolCallRecord) -> list[str]:
     for other in rows[1:]:
         a, b = base["airport"], other["airport"]
         diffs = contribution_differences(contrib[a], contrib[b])
-        parts = ", ".join(f"{label(k)} {v:+.2f} points (raises {a if v > 0 else b})" for k, v in diffs)
-        out.append(f"Why the indices differ ({a} minus {b}, largest first): {parts}")
+        parts = "; ".join(f"{label(k)} raises {a if v > 0 else b} by {abs(v):.2f} pts" for k, v in diffs if v)
+        out.append(f"Why the indices differ ({a} vs {b}, largest first): {parts}")
     view = _view(record)
     out += [i for i in view.get("interpretation", []) if "runway" in i]
     return out
@@ -135,12 +141,7 @@ def facts_live(record: ToolCallRecord) -> list[str]:
     d = record.envelope["data"]
     stamp = f" (FAA feed updated {d['feed_timestamp']})" if d.get("feed_timestamp") else ""
     out = [f"{d['airport']}: {d['status']}{stamp}"]
-    names = {"avgDelay": "average delay (min)", "maxDelay": "maximum delay (min)", "minDelay": "minimum delay (min)",
-             "startTime": "from", "endTime": "until", "updatedAt": "updated", "simpleText": "notice", "reason": "reason"}
-    for e in d.get("events", []):
-        details = ", ".join(f"{names.get(k, k)} {v}" for k, v in e.items() if k != "type" and k != "text")
-        kind = "".join(" " + c.lower() if c.isupper() else c for c in e["type"]).strip().capitalize()
-        out.append(f"{kind}: {details}" if details else kind)
+    out += d.get("event_descriptions", [])           # readable lines; events with nothing to show are dropped
     return out
 
 

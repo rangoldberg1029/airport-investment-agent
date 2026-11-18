@@ -29,7 +29,7 @@ def test_rank_headline_in_exact_tool_order_with_official_names(frames):
     assert list(d)[0] == "headline"
     rows = record.envelope["data"]["ranking"]["ranking"]
     expected = "; ".join(f"{r['rank']}. {r['airport']} {r['airport']} Intl {r['investment_score']}" for r in rows)
-    assert d["headline"] == ("Ranking with preset growth-led (demand pressure 25%, growth 45%, congestion 15%, "
+    assert d["headline"] == ("Ranking (preset growth-led: demand pressure 25%, growth 45%, congestion 15%, "
                              f"scale 15%): {expected}")
     assert d["preset"] == "growth-led"
     assert [row[2] for row in d["rows"]] == [f"{r['airport']} Intl" for r in rows]      # name column
@@ -37,10 +37,10 @@ def test_rank_headline_in_exact_tool_order_with_official_names(frames):
 
 def test_rank_headline_default_and_custom_weights_labels(frames):
     d = view(execute_tool("rank_airports", {"states": ["MA", "CT"]}, frames))
-    assert d["headline"].startswith("Ranking with preset balanced (default) (demand pressure 35%, growth 25%, "
+    assert d["headline"].startswith("Ranking (preset balanced (default): demand pressure 35%, growth 25%, "
                                     "congestion 25%, scale 15%): 1. ")
     custom = view(execute_tool("rank_airports", {"states": ["MA", "CT"], "weights": {"growth": 0.6}}, frames))
-    assert custom["headline"].startswith("Ranking with custom weights (") and custom["preset"] == "custom"
+    assert custom["headline"].startswith("Ranking (custom weights: ") and custom["preset"] == "custom"
 
 
 @pytest.mark.parametrize("name,args,path", [
@@ -181,13 +181,15 @@ class AppLLM:
     def set_sleep(self, sleep):
         pass
 
-    def complete(self, messages, tools, tool_choice="auto"):
+    def complete(self, messages, tools, tool_choice="auto", on_token=None):
         from agent.llm import QuotaExhausted
         if self.exhausted:
             raise QuotaExhausted(QUOTA_MESSAGE)
         self.calls += 1
-        if messages[-1]["role"] == "user":
+        if messages[-1]["role"] == "user" and tool_choice != "none":
             return LLMResponse("", [ToolCall(f"c{self.calls}", "rank_airports", '{"states": ["MA", "CT"]}')], 10)
+        if on_token:
+            on_token("Ranked.")
         return LLMResponse("Ranked.", [], 10)
 
 

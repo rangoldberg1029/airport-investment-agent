@@ -71,7 +71,7 @@ def test_invented_rerank_triggers_retry_with_required_tool_call(frames):
     assert [r.name for r in result.tool_calls] == ["rank_airports"]
     assert result.tool_calls[0].args["region"] == "new england" and result.tool_calls[0].args["preset"] == "growth-led"
     assert result.explanation.startswith("With growth weighted higher")
-    assert result.text.startswith("**Answer** - Top ") and "preset growth-led" in result.headline
+    assert result.text.startswith("**Answer** - Top ") and "Preset growth-led" in result.headline
     # the invented draft never enters the conversation history
     assert agent.turns[0].answer.endswith("AAA leads New England.") and agent.turns[1].answer == result.text
     assert all(INVENTED not in json.dumps(m) for m in fake.seen[-1])
@@ -97,7 +97,7 @@ def test_explaining_previous_output_without_tool_is_allowed(frames):
 class _NoToolLLM:
     """Never calls tools; used to test the follow-up context content only."""
 
-    def complete(self, messages, tools, tool_choice="auto"):
+    def complete(self, messages, tools, tool_choice="auto", on_token=None):
         return LLMResponse("ok", [], 1)
 
 

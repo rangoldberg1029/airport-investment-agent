@@ -52,7 +52,7 @@ def validate_weights(weights: dict | None, defaults: dict) -> tuple[dict, list[s
     total = sum(merged.values())
     merged = {k: v / total for k, v in merged.items()}
     return merged, [f"User-overridden weights (renormalised to sum 1): "
-                    + ", ".join(f"{k} {v:.0%}" for k, v in merged.items())]
+                    + ", ".join(f"{k.replace('_', ' ')} {v:.0%}" for k, v in merged.items())]
 
 
 def preset_of(weights: dict) -> str | None:
@@ -71,7 +71,8 @@ def investment_weights(preset: str | None = None, weights: dict | None = None) -
     base = WEIGHT_PRESETS[preset or DEFAULT_PRESET]
     if weights:
         return validate_weights(weights, base)
-    notes = [f"Weight preset '{preset}': " + ", ".join(f"{k} {v:.0%}" for k, v in base.items())] if preset else []
+    notes = ([f"Weight preset '{preset}': " + ", ".join(f"{k.replace('_', ' ')} {v:.0%}" for k, v in base.items())]
+             if preset else [])
     return dict(base), notes
 
 
@@ -181,21 +182,23 @@ def capacity_gap(passengers: float, seats: float, departures: float, target_lf: 
 def capacity_gap_interpretation(target: float, window: dict, peak: dict, peak_month: str) -> str:
     """Plain-language reading of a capacity-gap result (deterministic, so the LLM does not infer it)."""
     if window["extra_seats"] == 0 and peak["extra_seats"] == 0:
-        return (f"0 at target {target:.2f}: both the 12-month average LF ({window['current_load_factor']}) and the "
-                f"peak month LF ({peak['current_load_factor']}) are at or below the target; no seat shortage by this measure")
+        return (f"0 at target {target:.2f}: both the 12-month average load factor ({window['current_load_factor']}) "
+                f"and the peak-month load factor ({peak['current_load_factor']}) are at or below the target; no seat "
+                f"shortage by this measure")
     if window["extra_seats"] == 0:
-        return (f"0 for the 12-month window at target {target:.2f} means the average LF ({window['current_load_factor']}) "
-                f"is below the target; the shortage appears only in the peak month {peak_month} "
-                f"(LF {peak['current_load_factor']}). Delay-based pressure is shown separately in the components")
-    return (f"The 12-month average LF ({window['current_load_factor']}) is above target {target:.2f}: "
+        return (f"0 for the 12-month window at target {target:.2f} means the average load factor "
+                f"({window['current_load_factor']}) is below the target; the shortage appears only in the peak month "
+                f"{peak_month} (load factor {peak['current_load_factor']}). Delay-based pressure is shown separately "
+                f"in the components")
+    return (f"The 12-month average load factor ({window['current_load_factor']}) is above target {target:.2f}: "
             f"extra seats are needed across the year, more so in the peak month {peak_month}")
 
 
 def _gap_text(g: dict) -> str:
     if g["extra_seats"] == 0:
-        return f"0 extra seats (LF {g['current_load_factor']})"
+        return f"0 extra seats (load factor {g['current_load_factor']})"
     return (f"+{g['extra_seats']:,} seats (+{g['extra_seats_pct']}%, ~{g['extra_departures']:,} departures; "
-            f"LF {g['current_load_factor']})")
+            f"load factor {g['current_load_factor']})")
 
 
 def capacity_gap_headline(capacity_gap: dict) -> str:
@@ -203,7 +206,7 @@ def capacity_gap_headline(capacity_gap: dict) -> str:
     parts = []
     for target, entry in capacity_gap.items():
         lf = target.split("_")[1]
-        parts.append(f"at target LF {lf}: 12-month window {_gap_text(entry['window'])}; "
+        parts.append(f"at target load factor {lf}: 12-month window {_gap_text(entry['window'])}; "
                      f"peak month {entry['peak_month']['month']} {_gap_text(entry['peak_month'])}")
     return "Capacity gap (extra seats needed to bring load factor down to the target) - " + " | ".join(parts)
 
@@ -261,7 +264,7 @@ def unmet_demand(frames: Frames, name: str) -> dict:
         ALL_SOURCES[:2] + [SOURCE_LABELS["faa"]], PERIOD,
         ([a] if a else []) + [
             f"Capacity gap target load factor = {TARGET_LOAD_FACTOR:.2f} (industry 'effectively full' level); "
-            f"sensitivity at {', '.join(f'{x:.2f}' for x in LOAD_FACTOR_SENSITIVITY)} (large-hub median LF)",
+            f"sensitivity at {', '.join(f'{x:.2f}' for x in LOAD_FACTOR_SENSITIVITY)} (large-hub median load factor)",
             "Drivers = components where the airport is above the median of its FAA hub-size peers",
             UNIVERSE_TEXT,
         ],

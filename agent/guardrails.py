@@ -124,6 +124,14 @@ CODE_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{3}(?![A-Za-z0-9])")
 NON_AIRPORT_WORDS = {"FAA", "BTS", "NAS", "ATC", "DOT", "USA", "YOY", "CEO", "API", "KPI", "AND", "THE", "FOR", "ANY",
                      "ALL", "NOT", "TOP", "AVG", "MAX", "MIN", "PCT", "NET", "OPS", "SOC", "DFT"}
 ACTION_RE = re.compile(r"\b(re-?rank\w*|rank\w*|compar\w*|compute\w*|calculat\w*|recalculat\w*|weight\w*)\b", re.I)
+# A clear scope refusal needs no tool call (e.g. "Construction costs are out of scope").
+REFUSAL_RE = re.compile(r"\bout of (?:the )?scope\b|\boutside (?:the |our |my |this )?(?:US )?scope\b|"
+                        r"\bnot in (?:the )?scope\b|\bcovers US (?:commercial )?airports only\b|"
+                        r"\bonly covers US\b|\bcan(?:no|')t help with\b", re.I)
+
+
+def is_refusal(answer: str) -> bool:
+    return bool(REFUSAL_RE.search(answer or ""))
 
 
 def airport_codes(text: str, known_codes: set[str]) -> set[str]:
@@ -137,8 +145,11 @@ def grounding_issues(answer: str, user_text: str, tools_called_now: list[str], t
 
     a. every airport code in the answer appears in this conversation's tool outputs or user messages
        (`grounded_text` = all tool outputs + all user messages so far, as text);
-    b. the answer does not name a tool that was not called in this turn;
-    c. a request to rank / re-rank / compare / compute / change weights has at least one tool call this turn.
+    b. the answer does not claim a tool that was not called in this turn: its identifier ("rank_airports") or
+       "<name> tool" ("rank airports tool"). Plain topic words such as "unmet demand" are not tool claims;
+    c. a request to rank / re-rank / compare / compute / change weights has at least one tool call this turn,
+       unless the answer is a clear scope refusal.
+    `tools_called_now` includes tool calls made by code on the fast path (example cards, follow-up buttons).
     """
     issues = []
     unknown = sorted(airport_codes(answer, known_codes) - set(CODE_RE.findall(grounded_text)))
@@ -146,9 +157,9 @@ def grounding_issues(answer: str, user_text: str, tools_called_now: list[str], t
         issues.append(f"airport codes not found in any tool output or question: {', '.join(unknown)}")
     lowered = (answer or "").lower()
     claimed = [t for t in tool_names if t not in tools_called_now
-               and (t in lowered or t.replace("_", " ") in lowered)]
+               and (t in lowered or re.search(rf"\b{re.escape(t.replace('_', ' '))}\s+tool\b", lowered))]
     if claimed:
         issues.append(f"answer names tool(s) not called in this turn: {', '.join(claimed)}")
-    if ACTION_RE.search(user_text or "") and not tools_called_now:
+    if ACTION_RE.search(user_text or "") and not tools_called_now and not is_refusal(answer):
         issues.append("the request asks to rank/compare/compute or change weights, but no tool was called")
     return issues

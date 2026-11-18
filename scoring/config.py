@@ -92,6 +92,53 @@ AIRPORT_ALIASES = {
     "portland": ("PDX", ("PWM",)),
 }
 
+# Non-US airports a user is likely to ask about (the 40 largest non-US destinations in the T-100 data, plus a
+# few major hubs): IATA -> (name, city). Asking about them gets a clear "outside the US scope" answer
+# instead of "unknown airport".
+NON_US_AIRPORTS = {
+    "LHR": ("London Heathrow Airport", "london"), "LGW": ("London Gatwick Airport", "london"),
+    "YYZ": ("Toronto Pearson International Airport", "toronto"),
+    "CUN": ("Cancun International Airport", "cancun"), "MEX": ("Mexico City International Airport", "mexico city"),
+    "CDG": ("Paris Charles de Gaulle Airport", "paris"), "FRA": ("Frankfurt Airport", "frankfurt"),
+    "ICN": ("Seoul Incheon International Airport", "seoul"), "YVR": ("Vancouver International Airport", "vancouver"),
+    "AMS": ("Amsterdam Airport Schiphol", "amsterdam"), "GDL": ("Guadalajara International Airport", "guadalajara"),
+    "HND": ("Tokyo Haneda Airport", "tokyo"), "NRT": ("Tokyo Narita International Airport", "tokyo"),
+    "PUJ": ("Punta Cana International Airport", "punta cana"),
+    "YUL": ("Montreal-Trudeau International Airport", "montreal"),
+    "PTY": ("Tocumen International Airport", "panama city"), "SJD": ("Los Cabos International Airport", "los cabos"),
+    "TPE": ("Taiwan Taoyuan International Airport", "taipei"), "IST": ("Istanbul Airport", "istanbul"),
+    "YYC": ("Calgary International Airport", "calgary"), "DUB": ("Dublin Airport", "dublin"),
+    "SAL": ("El Salvador International Airport", "san salvador"), "MAD": ("Madrid-Barajas Airport", "madrid"),
+    "FCO": ("Rome Fiumicino Airport", "rome"), "MUC": ("Munich Airport", "munich"),
+    "BOG": ("El Dorado International Airport", "bogota"), "MBJ": ("Sangster International Airport", "montego bay"),
+    "SDQ": ("Las Americas International Airport", "santo domingo"), "DOH": ("Hamad International Airport", "doha"),
+    "GRU": ("Sao Paulo/Guarulhos International Airport", "sao paulo"),
+    "HKG": ("Hong Kong International Airport", "hong kong"), "SJO": ("Juan Santamaria International Airport",
+                                                                     "san jose costa rica"),
+    "PVR": ("Puerto Vallarta International Airport", "puerto vallarta"),
+    "DXB": ("Dubai International Airport", "dubai"), "ZRH": ("Zurich Airport", "zurich"),
+    "GUA": ("La Aurora International Airport", "guatemala city"), "AUA": ("Queen Beatrix International Airport",
+                                                                         "aruba"),
+    "BCN": ("Barcelona-El Prat Airport", "barcelona"), "LIS": ("Lisbon Airport", "lisbon"),
+    "SIN": ("Singapore Changi Airport", "singapore"), "SYD": ("Sydney Airport", "sydney"),
+    "PEK": ("Beijing Capital International Airport", "beijing"),
+    "PVG": ("Shanghai Pudong International Airport", "shanghai"),
+}
+
+# Local time zone per state (for live FAA status times). States spanning two zones use the zone of their
+# main commercial airports.
+STATE_TIMEZONES = {
+    **dict.fromkeys(("CT", "DE", "DC", "FL", "GA", "IN", "KY", "ME", "MD", "MA", "MI", "NH", "NJ", "NY", "NC",
+                     "OH", "PA", "RI", "SC", "VT", "VA", "WV"), "America/New_York"),
+    **dict.fromkeys(("AL", "AR", "IL", "IA", "KS", "LA", "MN", "MS", "MO", "NE", "ND", "OK", "SD", "TN", "TX",
+                     "WI"), "America/Chicago"),
+    **dict.fromkeys(("CO", "ID", "MT", "NM", "UT", "WY"), "America/Denver"),
+    "AZ": "America/Phoenix",
+    **dict.fromkeys(("CA", "NV", "OR", "WA"), "America/Los_Angeles"),
+    "AK": "America/Anchorage", "HI": "Pacific/Honolulu", "PR": "America/Puerto_Rico", "VI": "America/St_Thomas",
+    "GU": "Pacific/Guam",
+}
+
 # ---------------------------------------------------------------- citations
 SOURCE_LABELS = {
     "t100": "BTS T-100 Segment (All Carriers), TranStats - passenger service (CLASS F/L, non-freighter)",

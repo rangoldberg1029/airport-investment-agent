@@ -6,7 +6,7 @@ import time
 import streamlit as st
 
 from agent.agent import Agent, TurnResult
-from agent.headlines import answer_headline, compose
+from agent.headlines import compose
 from scoring.common import window_label
 from scoring.config import WINDOW
 from agent.prompts import PROMPT_VERSION
@@ -14,7 +14,7 @@ from ui import setup
 from ui.cache import cache_key
 from ui.progress import StatusReporter, done_line
 from ui.render import (
-    EXAMPLE_CALLS, EXAMPLES, about_markdown, render_assistant, render_checks, render_details, render_followups,
+    EXAMPLE_CALLS, EXAMPLES, AnswerFrame, LiveAnswer, about_markdown, render_assistant, render_followups,
 )
 
 st.set_page_config(page_title="Airport Investment Intelligence", page_icon="✈️", layout="wide")
@@ -36,6 +36,14 @@ def ask_later(question: str, tool: str | None = None, args: dict | None = None) 
     st.session_state.pending = {"text": question, "tool": tool, "args": args or {}}
 
 
+def send_voice() -> None:
+    """Voice 'Send' callback: queue the (edited) transcript and clear the transcript box."""
+    text = (st.session_state.get("voice_text") or "").strip()
+    if text:
+        st.session_state.pending = {"text": text}
+    st.session_state.voice_text = ""
+
+
 def new_conversation() -> None:
     """Button callback: clear the conversation before the page redraws (so the empty state shows at once)."""
     st.session_state.messages = []
@@ -51,10 +59,16 @@ if "agent" not in st.session_state and api_key:
     st.session_state.agent = Agent(setup.make_client(), frames)
 st.session_state.setdefault("pending", None)
 
-# Empty state = no conversation yet and nothing queued. The example questions are shown in exactly one place:
+# A question submitted on this run, from any path: typed (chat input), card / follow-up / sidebar button or
+# voice (callbacks set `pending` before the rerun). Read before anything is drawn, so the welcome cards are
+# hidden at once.
+typed = st.session_state.get("chat_input")
+request = {"text": typed} if typed else st.session_state.pending
+st.session_state.pending = None
+busy = bool(request and request.get("text") and api_key)
+# Empty state = no conversation yet and nothing submitted. The example questions are shown in exactly one place:
 # as cards in the main area on the empty state, otherwise in the sidebar.
-incoming = st.session_state.get("chat_input") or st.session_state.pending
-empty_state = not st.session_state.messages and not incoming
+empty_state = not st.session_state.messages and not busy
 
 # ---------------------------------------------------------------- sidebar
 with st.sidebar:
@@ -90,9 +104,8 @@ with st.sidebar:
                     st.warning(f"Voice transcription is unavailable right now ({type(exc).__name__}). "
                                "Please type your question.")
         if st.session_state.get("voice_text"):
-            edited = st.text_area("Transcript (check airport codes, then send)", key="voice_text", height=90)
-            if st.button("Send", key="voice_send", width="stretch"):
-                st.session_state.pending = {"text": edited.strip()}
+            st.text_area("Transcript (check airport codes, then send)", key="voice_text", height=90)
+            st.button("Send", key="voice_send", width="stretch", on_click=send_voice)
 
     st.divider()
     st.caption("**Model:** " + (setup.model_info(st.session_state.agent.client)
@@ -113,97 +126,78 @@ if not api_key:
             "The data and methodology above are available without a key.")
 
 # ---------------------------------------------------------------- empty state
+# Always one placeholder at this position: when a question is submitted it renders empty, which replaces the
+# cards immediately instead of leaving them greyed out while the answer loads.
 EXAMPLE_TITLES = ["Expansion candidates", "Congestion comparison", "Long-haul share", "Unmet demand"]
+welcome = st.empty()
 if empty_state:
-    st.markdown("#### Welcome")
-    st.markdown("Ask about passenger demand, congestion or expansion candidates at US airports, "
-                "or start with one of these questions:")
-    cols = st.columns(2)
-    for i, (title, q) in enumerate(zip(EXAMPLE_TITLES, EXAMPLES)):
-        with cols[i % 2].container(border=True):
-            st.markdown(f"**{title}**")
-            st.button(q, key=f"card_{i}", type="tertiary", disabled=not api_key, on_click=ask_later,
-                      args=(q, *EXAMPLE_CALLS[i]))
+    with welcome.container():
+        st.markdown("#### Welcome")
+        st.markdown("Ask about passenger demand, congestion or expansion candidates at US airports, "
+                    "or start with one of these questions:")
+        cols = st.columns(2)
+        for i, (title, q) in enumerate(zip(EXAMPLE_TITLES, EXAMPLES)):
+            with cols[i % 2].container(border=True):
+                st.markdown(f"**{title}**")
+                st.button(q, key=f"card_{i}", type="tertiary", disabled=not api_key, on_click=ask_later,
+                          args=(q, *EXAMPLE_CALLS[i]))
 
 # ---------------------------------------------------------------- history
-for idx, message in enumerate(st.session_state.messages):
+# Follow-up buttons only under the latest answer, and not while a new answer is loading (each element once).
+messages = st.session_state.messages
+last_answer = max((i for i, m in enumerate(messages) if m["role"] == "assistant"), default=None)
+for idx, message in enumerate(messages):
     with st.chat_message(message["role"]):
         if message["role"] == "user":
             st.markdown(message["text"])
         else:
-            render_assistant(message, key=f"msg{idx}", on_followup=ask_later)
+            latest = idx == last_answer and not busy
+            render_assistant(message, key=f"msg{idx}" if latest else None, on_followup=ask_later if latest else None)
 
 # ---------------------------------------------------------------- new question
-typed = st.chat_input("Ask about US airport demand, congestion or expansion candidates",
-                      disabled=not api_key, key="chat_input")
-request = {"text": typed} if typed else st.session_state.pending
-st.session_state.pending = None
+st.chat_input("Ask about US airport demand, congestion or expansion candidates", disabled=not api_key,
+              key="chat_input")
 
 RATE_LIMITED_NOTE = "The LLM provider is temporarily at capacity. Please try again in about a minute."
 
 
-def error_note(result: TurnResult) -> str:
-    return RATE_LIMITED_NOTE if result.error == "rate_limited" else result.explanation
-
-
 def message_from(result: TurnResult, meta: str) -> dict:
-    text = compose(result.headline, error_note(result), why_heading=False) if result.error else result.text
-    return {"role": "assistant", "text": text, "records": result.tool_calls,
-            "untraceable": result.untraceable_numbers, "meta": meta, "error": result.error,
-            "grounding_issues": result.grounding_issues, "retried": result.retried}
+    note = RATE_LIMITED_NOTE if result.error == "rate_limited" else result.explanation
+    text = compose(result.headline, note, why_heading=False) if result.error else result.text
+    return {"role": "assistant", "text": text, "headline": result.headline, "explanation": note,
+            "records": result.tool_calls, "untraceable": result.untraceable_numbers, "meta": meta,
+            "error": result.error, "grounding_issues": result.grounding_issues, "retried": result.retried}
 
 
-def answer_with_agent(agent: Agent, question: str, primary: str) -> dict:
-    """Typed or spoken question: the LLM chooses the tool(s), then explains."""
+def answer(agent: Agent, question: str, tool: str | None, args: dict, primary: str, frame: AnswerFrame) -> dict:
+    """Run one turn into `frame`. Fast path (card / follow-up: known tool + arguments): the tool runs now and the
+    Answer line, Key facts and Evidence appear at once. Typed path: they appear as soon as the LLM's tool call
+    has run. In both, the Why / drivers bullets then stream in under the Answer line."""
     started = time.monotonic()
-    with st.status("Analyzing question...", expanded=False) as status:
-        reporter = StatusReporter(status)
-        if hasattr(agent.client, "set_sleep"):
-            agent.client.set_sleep(reporter.sleep)
-        result = agent.ask(question, on_event=reporter.on_event)
-        done = done_line(result, time.monotonic() - started, primary)
-        status.update(label=done if not result.error else "Stopped",
-                      state="error" if result.error else "complete", expanded=False)
-    message = message_from(result, done)
-    st.session_state.messages.append(message)
-    render_assistant(message, show_meta=False,     # the status label above already shows "Done"
-                     key=f"msg{len(st.session_state.messages) - 1}", on_followup=ask_later)
-    return message
-
-
-def answer_direct(agent: Agent, question: str, tool: str, args: dict, primary: str) -> dict:
-    """Example card or suggested follow-up: run the known tool now and show the computed Answer, Key facts and
-    Evidence at once; then one LLM call writes the Why / drivers bullets into the slot below the Answer."""
-    started = time.monotonic()
-    status = st.status("Running tool...", expanded=False)
-    reporter = StatusReporter(status)
+    with frame.status.container():
+        status = st.status("Running tool..." if tool else "Analyzing question...", expanded=False)
+    reporter, live = StatusReporter(status), LiveAnswer(frame)
     if hasattr(agent.client, "set_sleep"):
         agent.client.set_sleep(reporter.sleep)
-    turn = agent.start_direct(question, tool, args, on_event=reporter.on_event)
-    headline = answer_headline(turn.records)
-    if headline:
-        st.markdown(compose(headline, ""))
-    why = st.empty()
-    why.caption("Writing the explanation...")
-    render_details(turn.records)
-    result = agent.explain(turn, on_event=reporter.on_event)
+
+    def on_event(event: str, **kw) -> None:
+        reporter.on_event(event, **kw)
+        live.on_event(event, **kw)
+    if tool:
+        turn = agent.start_direct(question, tool, args, on_event=on_event)
+        live.show_facts(turn.records, agent.headline(turn))
+        result = agent.explain(turn, on_event=on_event)
+    else:
+        result = agent.ask(question, on_event=on_event)
     done = done_line(result, time.monotonic() - started, primary)
-    status.update(label=done if not result.error else "Stopped",
-                  state="error" if result.error else "complete", expanded=False)
+    status.update(label=done if not result.error else "Stopped", state="error" if result.error else "complete",
+                  expanded=False)
     message = message_from(result, done)
-    st.session_state.messages.append(message)
-    with why.container():
-        if result.error:
-            st.markdown(error_note(result))
-        else:
-            st.markdown(("**Why / drivers**\n" if result.headline else "") + result.explanation)
-            render_checks(message)
-    if not result.error:
-        render_followups(result.tool_calls, key=f"msg{len(st.session_state.messages) - 1}", on_followup=ask_later)
+    live.finish(message)
     return message
 
 
-if request and request.get("text") and api_key:
+if busy:
     question = request["text"]
     agent: Agent = st.session_state.agent
     primary = getattr(agent.client, "model", "")
@@ -215,17 +209,21 @@ if request and request.get("text") and api_key:
     with st.chat_message("user"):
         st.markdown(question)
     with st.chat_message("assistant"):
+        frame = AnswerFrame.create()
         if cached is not None:                      # first question asked before: serve instantly
             agent.restore_turn(cached.turn)
             message = {**cached.message, "cached": True}
             message["meta"] = "Cached result · " + message["meta"].removeprefix("Done · ")
-            st.session_state.messages.append(message)
-            render_assistant(message, key=f"msg{len(st.session_state.messages) - 1}", on_followup=ask_later)
         else:
-            if request.get("tool"):
-                message = answer_direct(agent, question, request["tool"], request.get("args") or {}, primary)
-            else:
-                message = answer_with_agent(agent, question, primary)
-            if (first_question and not message["error"] and not message["untraceable"]
-                    and not message["grounding_issues"]):
+            message = answer(agent, question, request.get("tool"), request.get("args") or {}, primary, frame)
+            # Cache only clean first answers: no error, no retry, every check passed.
+            if (first_question and not message["error"] and not message["retried"]
+                    and not message["untraceable"] and not message["grounding_issues"]):
                 setup.get_answer_cache().put(key, message, agent.turns[-1])
+        st.session_state.messages.append(message)
+        idx = len(st.session_state.messages) - 1
+        if cached is not None:
+            render_assistant(message, frame, key=f"msg{idx}", on_followup=ask_later)
+        elif not message["error"]:
+            with frame.followups.container():
+                render_followups(message["records"], f"msg{idx}", ask_later)

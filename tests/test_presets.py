@@ -41,9 +41,10 @@ def test_explicit_numbers_are_custom_weights_and_unknown_preset_is_an_error(fram
 
 def test_preset_name_and_weights_in_headline_and_key_facts(frames):
     record = execute_tool("rank_airports", {"states": ["MA", "CT"], "preset": "scale-led"}, frames)
-    label = "preset scale-led (demand pressure 25%, growth 15%, congestion 15%, scale 45%)"
-    assert f"Weights: {label}." in answer_headline([record])
-    assert key_facts([record])[0] == f"Weights: {label}"
+    label = "Preset scale-led: demand pressure 25%, growth 15%, congestion 15%, scale 45%"
+    assert f"{label}." in answer_headline([record])
+    assert key_facts([record])[0] == label
+    assert "(default) (" not in answer_headline([execute_tool("rank_airports", {"states": ["MA"]}, frames)])
 
 
 def test_rank_stability_uses_all_presets(frames):

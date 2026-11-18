@@ -2,7 +2,7 @@
 
 import pytest
 
-from agent.agent import Agent
+from agent.agent import Agent  # noqa: F401  (used below)
 from agent.headlines import answer_headline, compose, why_bullets
 from agent.llm import QUOTA_MESSAGE, QuotaExhausted
 from agent.tools import execute_tool, live_airport_status
@@ -17,19 +17,18 @@ def test_rank_headline_is_built_from_the_ranking(frames):
     items = "; ".join(f"{r['rank']}. {r['airport']} {r['airport']} Intl ({r['investment_score']})" for r in rows)
     assert answer_headline([record]) == (
         f"Top {len(rows)} candidates in MA/CT for terminal expansion (investment score 0-100, "
-        f"Sep 2025 - Aug 2026): {items}. Weights: preset balanced (default) (demand pressure 35%, growth 25%, "
-        f"congestion 25%, scale 15%).")
+        f"Sep 2025 - Aug 2026): {items}. Preset balanced (default): demand pressure 35%, growth 25%, "
+        f"congestion 25%, scale 15%.")
 
 
 def test_rank_headline_names_the_preset_and_its_weights(frames):
     headline = answer_headline([execute_tool("rank_airports", {"region": "new england", "preset": "growth-led"},
                                              frames)])
     assert headline.startswith("Top ") and "New England candidates" in headline
-    assert ("Weights: preset growth-led (demand pressure 25%, growth 45%, congestion 15%, scale 15%)."
-            in headline)
+    assert "Preset growth-led: demand pressure 25%, growth 45%, congestion 15%, scale 15%." in headline
     custom = answer_headline([execute_tool("rank_airports", {"region": "new england", "weights": {"growth": 0.5}},
                                            frames)])
-    assert "Weights: custom weights (" in custom
+    assert "Custom weights: " in custom
 
 
 @pytest.mark.parametrize("name,args,expected", [
@@ -45,7 +44,39 @@ def test_every_tool_has_a_headline(frames, name, args, expected):
 
 def test_compare_headline_states_the_largest_driver(frames):
     headline = answer_headline([execute_tool("compare_congestion", {"airports": ["AAA", "BBB"]}, frames)])
-    assert "Largest single driver of the difference:" in headline and "index points, raises" in headline
+    assert "Largest single driver of the difference: arrival delay rate raises AAA by 11.67 pts." in headline
+
+
+# ---------------------------------------------------------------- "why is X lower?" gets its own headline
+
+def test_why_lower_headline_explains_from_the_drivers(frames):
+    record = execute_tool("compare_congestion", {"airports": ["AAA", "BBB"]}, frames)
+    rows = {r["airport"]: r["congestion_index"] for r in record.envelope["data"]["congestion"]["airports"]}
+    low, high = sorted(rows, key=rows.get)
+    headline = answer_headline([record], f"Why is {low} lower?")
+    assert headline.startswith(f"Why {low}'s congestion index is lower ({low} {rows[low]} vs {high} {rows[high]}):")
+    assert f"raises {high} by" in headline and "Net:" in headline
+    assert not headline.startswith("Congestion index (0-100")                  # not the comparison headline again
+
+
+def test_why_question_with_a_wrong_premise_is_corrected(frames):
+    record = execute_tool("compare_congestion", {"airports": ["AAA", "BBB"]}, frames)
+    rows = {r["airport"]: r["congestion_index"] for r in record.envelope["data"]["congestion"]["airports"]}
+    high = max(rows, key=rows.get)
+    assert answer_headline([record], f"Why is {high} lower?").startswith(f"{high} is not lower: its congestion index "
+                                                                          "is higher")
+
+
+def test_out_of_scope_airport_headline(frames):
+    record = execute_tool("long_haul_share", {"airport": "LHR"}, frames)
+    assert answer_headline([record]).startswith("LHR London Heathrow Airport is outside the US scope")
+
+
+def test_national_ranking_note_without_previous_context(frames):
+    fake = FakeLLM([call("rank_airports", {}), text("- answer")])
+    result = Agent(fake, frames).ask("Which is third now?")
+    assert "No previous ranking in this conversation; showing the national ranking." in result.headline
+    assert "no previous result in this conversation" in fake.seen[0][-1]["content"]      # clarify-note for the LLM
 
 
 def test_unmet_headline_has_capacity_gap_and_proxy_caveat(frames):

@@ -37,6 +37,9 @@ GEMINI_TIMEOUT_S, GROQ_TIMEOUT_S = 20.0, 60.0
 SERVER_RETRY_DELAY_S = 2.0          # wait before the one retry after a 5xx / timeout
 FALLBACK_AFTER_S = 5.0              # switch instead of waiting longer than this for the primary's rate limit
 MAX_OUTPUT_TOKENS = 1000            # per call, incl. hidden reasoning tokens (eval answers <= ~600)
+GEMINI_MAX_OUTPUT_TOKENS = 2000     # Gemini counts its thinking in the output limit: more room, no cut-offs
+# Optional request parameters dropped (and the call repeated once) if a provider rejects them with HTTP 400.
+OPTIONAL_PARAMS = {"reasoning_effort": r"reasoning|thinking", "stream_options": r"stream_options|include_usage"}
 # Gemini 3 validates "thought signatures" on function calls in the conversation. Calls it did not produce itself
 # (the app's direct tool calls, or calls made by the Groq fallback) carry Google's documented placeholder.
 GEMINI_PLACEHOLDER_SIGNATURE = "skip_thought_signature_validator"
@@ -75,10 +78,12 @@ class LLMResponse:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     model: str = ""               # which model produced this response (primary or fallback)
+    finish_reason: str = "stop"   # "length" = cut off by the output limit; "" = a stream ended without a reason
 
 
 class LLMClient(Protocol):
-    def complete(self, messages: list[dict], tools: list[dict], tool_choice: str = "auto") -> LLMResponse: ...
+    def complete(self, messages: list[dict], tools: list[dict], tool_choice: str = "auto",
+                 on_token: Callable[[str], None] | None = None) -> LLMResponse: ...
 
 
 # ---------------------------------------------------------------- retry + pacing (pure, tested)
@@ -312,6 +317,7 @@ class Provider:
     client: Any                   # openai.OpenAI, or a stub in tests
     effort: str | None            # reasoning effort sent with each call (None = not sent)
     pacer: TpmPacer
+    stream_usage: bool = True     # ask for token usage in streamed answers (dropped if the provider rejects it)
 
     @property
     def is_gemini(self) -> bool:
@@ -443,21 +449,24 @@ class OpenAIChat:
                 return self.fallback
         return self.primary
 
-    def complete(self, messages: list[dict], tools: list[dict], tool_choice: str = "auto") -> LLMResponse:
+    def complete(self, messages: list[dict], tools: list[dict], tool_choice: str = "auto",
+                 on_token: Callable[[str], None] | None = None) -> LLMResponse:
+        """One chat completion. With on_token, the answer is streamed: each text piece is passed to on_token as
+        it arrives (the error policy applies until the stream starts)."""
         estimate = estimate_tokens(messages, tools, self.max_output_tokens // 2)
         provider = self.choose(estimate)
         try:
-            return self._call(provider, messages, tools, tool_choice, estimate)
+            return self._call(provider, messages, tools, tool_choice, estimate, on_token)
         except DailyLimitReached:
             self.exhausted.add(provider.model)
-            return self.complete(messages, tools, tool_choice)      # next provider, or QuotaExhausted
+            return self.complete(messages, tools, tool_choice, on_token)      # next provider, or QuotaExhausted
         except PrimaryUnavailable as exc:
             self.switch_reason = exc.reason
             try:
-                return self._call(self.fallback, messages, tools, tool_choice, estimate)
+                return self._call(self.fallback, messages, tools, tool_choice, estimate, on_token)
             except DailyLimitReached:
                 self.exhausted.add(self.fallback.model)
-                return self.complete(messages, tools, tool_choice)
+                return self.complete(messages, tools, tool_choice, on_token)
 
     # -------------------------------------------------- one HTTP call
     def _kwargs(self, provider: Provider, messages: list[dict], tools: list[dict], tool_choice: str) -> dict:
@@ -466,7 +475,7 @@ class OpenAIChat:
             kwargs.update(tools=tools, tool_choice=tool_choice)
         if provider.is_gemini:
             # Gemini 3: Google advises keeping the default temperature (1.0); lower values can cause loops.
-            kwargs["max_tokens"] = self.max_output_tokens
+            kwargs["max_tokens"] = max(self.max_output_tokens, GEMINI_MAX_OUTPUT_TOKENS)
         else:
             kwargs.update(temperature=self.temperature, max_completion_tokens=self.max_output_tokens)
         if provider.effort:
@@ -478,18 +487,27 @@ class OpenAIChat:
         try:
             return create(**kwargs)
         except Exception as exc:
-            # A model that rejects the reasoning level: stop sending it and try once more without it.
-            if ("reasoning_effort" in kwargs and getattr(exc, "status_code", None) == 400
-                    and re.search(r"reasoning|thinking", str(exc), re.I)):
-                provider.effort = None
-                kwargs.pop("reasoning_effort")
-                return create(**kwargs)
+            # A provider that rejects an optional parameter (reasoning level, streamed usage): stop sending it
+            # and try once more without it.
+            if getattr(exc, "status_code", None) == 400:
+                for param, pattern in OPTIONAL_PARAMS.items():
+                    if param in kwargs and re.search(pattern, str(exc), re.I):
+                        kwargs.pop(param)
+                        if param == "reasoning_effort":
+                            provider.effort = None
+                        else:
+                            provider.stream_usage = False
+                        return create(**kwargs)
             raise
 
     def _call(self, provider: Provider, messages: list[dict], tools: list[dict], tool_choice: str,
-              estimate: int) -> LLMResponse:
+              estimate: int, on_token: Callable[[str], None] | None = None) -> LLMResponse:
         provider.pacer.wait_for(estimate)
         kwargs = self._kwargs(provider, messages, tools, tool_choice)
+        if on_token is not None:
+            kwargs["stream"] = True
+            if provider.stream_usage:
+                kwargs["stream_options"] = {"include_usage": True}
         request = lambda: self._request(provider, kwargs)  # noqa: E731
         if provider is self.primary and self.fallback and self.fallback.model not in self.exhausted:
             # Primary with a usable fallback: 429 -> switch now; 5xx/timeout -> one retry, then switch.
@@ -514,20 +532,48 @@ class OpenAIChat:
             # No fallback (or this is the fallback): 429 -> backoff retries; 5xx/timeout -> one retry.
             raw = with_retry(lambda: with_server_retry(request, self.sleep), sleep=self.sleep)
         self._observe(provider, raw.headers)
-        resp = raw.parse()
-        usage = resp.usage
-        total = usage.total_tokens if usage else 0
+        if on_token is not None:
+            content, calls, usage, finish = self._read_stream(raw.parse(), on_token)
+        else:
+            resp = raw.parse()
+            usage, msg = resp.usage, resp.choices[0].message
+            finish = getattr(resp.choices[0], "finish_reason", None) or "stop"
+            content = msg.content or ""
+            calls = [ToolCall(c.id, c.function.name, c.function.arguments or "{}",
+                              (getattr(c, "model_extra", None) or {}).get("extra_content"))
+                     for c in (msg.tool_calls or [])]
+        # Without usage (a stream whose provider does not report it): estimate, for pacing only.
+        total = usage.total_tokens if usage else estimate_tokens(messages, tools, len(content) // 4)
         cached = getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0
         # Groq: cached prompt tokens do not count toward the rate limits.
         provider.pacer.record(total if provider.is_gemini else max(0, total - cached))
-        msg = resp.choices[0].message
-        calls = [ToolCall(c.id, c.function.name, c.function.arguments or "{}",
-                          (getattr(c, "model_extra", None) or {}).get("extra_content"))
-                 for c in (msg.tool_calls or [])]
-        return LLMResponse(msg.content or "", calls, total,
+        return LLMResponse(content, calls, total,
                            usage.prompt_tokens if usage else 0,
                            usage.completion_tokens if usage else 0,
-                           model=provider.model)
+                           model=provider.model, finish_reason=finish)
+
+    @staticmethod
+    def _read_stream(stream, on_token: Callable[[str], None]) -> tuple[str, list[ToolCall], Any, str]:
+        """Collect a streamed completion, passing each text piece to on_token as it arrives.
+        Returns (text, tool calls, usage, finish reason; "" if the stream ended without one)."""
+        parts, usage, pending, finish = [], None, {}, ""
+        for chunk in stream:
+            if getattr(chunk, "usage", None):
+                usage = chunk.usage
+            for choice in getattr(chunk, "choices", None) or []:
+                finish = getattr(choice, "finish_reason", None) or finish
+                delta = choice.delta
+                if getattr(delta, "content", None):
+                    parts.append(delta.content)
+                    on_token(delta.content)
+                for tc in getattr(delta, "tool_calls", None) or []:      # not expected with tool_choice="none"
+                    item = pending.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
+                    item["id"] = tc.id or item["id"]
+                    if tc.function:
+                        item["name"] += tc.function.name or ""
+                        item["arguments"] += tc.function.arguments or ""
+        calls = [ToolCall(c["id"], c["name"], c["arguments"] or "{}") for c in pending.values() if c["name"]]
+        return "".join(parts), calls, usage, finish
 
     @staticmethod
     def _observe(provider: Provider, headers) -> None:

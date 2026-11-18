@@ -51,7 +51,8 @@ def test_capacity_gap_by_hand():
 def test_capacity_gap_interpretation_branches():
     zero = {"extra_seats": 0, "current_load_factor": 0.817}
     peak = {"extra_seats": 67382, "current_load_factor": 0.87}
-    assert "means the average LF (0.817) is below the target" in         ranking.capacity_gap_interpretation(0.85, zero, peak, "2026-06")
+    assert "means the average load factor (0.817) is below the target" in \
+        ranking.capacity_gap_interpretation(0.85, zero, peak, "2026-06")
     assert "no seat shortage" in ranking.capacity_gap_interpretation(0.9, zero, {**zero, "current_load_factor": 0.85}, "x")
     above = {"extra_seats": 5, "current_load_factor": 0.817}
     assert "above target 0.80" in ranking.capacity_gap_interpretation(0.80, above, peak, "2026-06")

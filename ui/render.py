@@ -1,8 +1,9 @@
-"""Rendering: the 'About this agent' text (pure) and one assistant message (answer, key facts, evidence)."""
+"""Rendering: the 'About this agent' text (pure), one assistant answer in a fixed frame (stored or live)."""
 
 import json
 import os
 import re
+from dataclasses import dataclass
 from datetime import date
 
 import streamlit as st
@@ -167,24 +168,113 @@ def render_details(records: list[ToolCallRecord]) -> None:
             render_evidence(records)
 
 
-def render_assistant(message: dict, show_meta: bool = True, key: str | None = None, on_followup=None) -> None:
-    """Answer text (computed Answer line + the LLM's Why / drivers), check warnings, Key facts, Evidence and
-    suggested follow-ups (when `key` and `on_followup` are given). show_meta=False when the live status label
-    already shows 'Done'."""
-    if message.get("cached"):
-        if hasattr(st, "badge"):
+@dataclass
+class AnswerFrame:
+    """The fixed element layout of one assistant answer: status, Answer line, Why / drivers, Key facts +
+    Evidence, follow-ups. History and live answers use the same slots in the same order, so when the page reruns
+    each slot is replaced in place (no greyed duplicates of cards or follow-up buttons)."""
+    status: object
+    headline: object
+    why: object
+    details: object
+    followups: object
+
+    @classmethod
+    def create(cls) -> "AnswerFrame":
+        return cls(st.empty(), st.empty(), st.empty(), st.empty(), st.empty())
+
+
+WRITING = "Writing explanation…"
+SPINNER_HTML = (
+    '<div style="display:flex;align-items:center;gap:.5rem;opacity:.75;font-size:.9rem">'
+    '<span class="aia-spin"></span>' + WRITING + '</div>'
+    "<style>.aia-spin{width:14px;height:14px;border:2px solid rgba(31,58,95,.25);border-top-color:#1f3a5f;"
+    "border-radius:50%;display:inline-block;animation:aia-spin .8s linear infinite}"
+    "@keyframes aia-spin{to{transform:rotate(360deg)}}</style>")
+
+
+def why_markdown(message: dict) -> str:
+    """The Why / drivers part of a stored answer (or its plain reply / error note)."""
+    if message.get("headline") and not message.get("error"):
+        return "**Why / drivers**\n" + (message.get("explanation") or "")
+    return message.get("explanation") or (message.get("text") if not message.get("headline") else "")
+
+
+def render_assistant(message: dict, frame: AnswerFrame | None = None, key: str | None = None,
+                     on_followup=None) -> None:
+    """A stored answer in its frame: status line, computed Answer line, Why / drivers + check notices, Key facts
+    and Evidence, and follow-up buttons (only when `key` and `on_followup` are given: the latest answer)."""
+    frame = frame or AnswerFrame.create()
+    with frame.status.container():
+        if message.get("cached"):
             st.badge("Cached result", icon=":material/bolt:", color="gray")
-        else:
-            st.caption("Cached result")
-    st.markdown(message["text"])
-    render_checks(message)
+        if message.get("meta"):
+            st.caption(message["meta"])
+    if message.get("headline"):
+        frame.headline.markdown(f"**Answer** - {message['headline']}")
+    else:
+        frame.headline.empty()
+    with frame.why.container():
+        st.markdown(why_markdown(message))
+        render_checks(message)
     records = message.get("records") or []
-    render_details(records)
-    meta = message.get("meta")
-    if meta and show_meta:
-        st.caption(meta)
+    with frame.details.container():
+        render_details(records)
     if key is not None and on_followup is not None and not message.get("error"):
-        render_followups(records, key, on_followup)
+        with frame.followups.container():
+            render_followups(records, key, on_followup)
+    else:
+        frame.followups.empty()
+
+
+class LiveAnswer:
+    """Fills an AnswerFrame while a turn runs: Answer line + Key facts + Evidence as soon as the tools ran, a
+    spinner where the bullets will appear, then the bullets token by token. On a grounding retry the bullets
+    are cleared and streamed again."""
+
+    def __init__(self, frame: AnswerFrame):
+        self.frame = frame
+        self.headline = ""
+        self.text = ""
+
+    def show_facts(self, records: list[ToolCallRecord], headline: str) -> None:
+        self.headline = headline
+        if headline:
+            self.frame.headline.markdown(f"**Answer** - {headline}")
+        with self.frame.details.container():
+            render_details(records)
+        self.waiting()
+
+    def waiting(self) -> None:
+        self.text = ""
+        self.frame.why.markdown(SPINNER_HTML, unsafe_allow_html=True)
+
+    def token(self, piece: str) -> None:
+        self.text += piece
+        self.frame.why.markdown(("**Why / drivers**\n" if self.headline else "") + self.text + " ▌")
+
+    def on_event(self, event: str, **kw) -> None:
+        if event == "facts_ready":
+            self.show_facts(kw["records"], kw.get("headline", ""))
+        elif event == "token":
+            self.token(kw["text"])
+        elif event == "retry":
+            self.waiting()
+
+    def finish(self, message: dict) -> None:
+        """Replace the streamed text with the final answer (checked bullets + notices)."""
+        render_assistant_parts(self.frame, message)
+
+
+def render_assistant_parts(frame: AnswerFrame, message: dict) -> None:
+    """Final Answer line, Why / drivers and notices, Key facts and Evidence (not status or follow-ups)."""
+    if message.get("headline"):
+        frame.headline.markdown(f"**Answer** - {message['headline']}")
+    with frame.why.container():
+        st.markdown(why_markdown(message))
+        render_checks(message)
+    with frame.details.container():
+        render_details(message.get("records") or [])
 
 
 def render_checks(message: dict) -> None:
