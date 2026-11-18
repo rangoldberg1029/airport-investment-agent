@@ -128,7 +128,115 @@ All computed per airport over a trailing 12-month window (state the window in ev
 - [x] 2. Data spike: verify each source, record exact endpoints/fields in data/raw/README.md
 - [x] 3. ETL → DuckDB
 - [x] 4. Metrics + scoring + tests (the 4 example questions answered via Python only)
-- [x] 5. Agent loop + tools
-- [x] 6. Streamlit chat UI (show tool calls + sources; voice = bonus)
-- [ ] 7. DESIGN.md + README.md
-- [ ] 8. Publish public GitHub repo
+- [x] 5. Agent loop + tools (incl. guardrails: number check, grounding check, retry)
+- [x] 6. Streamlit chat UI (show tool calls + sources; voice = bonus); polish done
+      (empty state, follow-ups, ranking headlines, quota handling, examples in one place)
+- [ ] 7. DESIGN.md + README.md  ← next
+- [ ] 8. Publish (repo is already public on GitHub, origin main; optional Streamlit Community Cloud deploy)
+
+## Decisions log
+One line of reasoning per decision. Values live in `scoring/config.py`; change them there, not here.
+
+### Data
+- **Window: Sep 2025 – Aug 2026 (trailing 12 months), prior window Sep 2024 – Aug 2025.** The latest complete
+  T-100 months; equal-length windows make YoY growth comparable and remove seasonality.
+- **Keep all downloaded months in DuckDB; windows are applied in scoring.** Lets the window move without a re-ETL.
+- **Drop the carrier dimension in the processed tables.** Not needed for any KPI and keeps the parquet caches small.
+- **Processed parquet caches committed in `data/processed`; raw downloads never committed.** The app builds
+  offline in ~20 s with no downloads; caches are refreshed only with `python -m data.etl --from-raw`.
+- **Passenger service = CLASS in (F, L) and AIRCRAFT_CONFIG != 2.** Scheduled + non-scheduled passenger
+  service, excluding freighter-configured aircraft (scope: passenger airports).
+- **Completion gap only on rows with departures scheduled > 0 (US carriers).** Foreign carriers report
+  scheduled = 0, which made the gap negative.
+- **Long-haul ≥ 3,000 statute miles, sensitivity 2,500 / 4,000; departure- and seat-weighted.** The threshold
+  is an assumption, so the answer shows how much it matters.
+- **NAS share = NAS delay minutes / sum of the five cause columns.** The NAS cause is the closest public
+  proxy for airport/airspace capacity constraints.
+- **Runway rule: commercial runways ≥ 5,000 ft (inclusive); helipads and unlabelled runways excluded.**
+  Short GA strips inflated the runway count and understated operations per runway.
+- **Quality report: cross-check within ±1%, the one known delay-cause flag documented.** Proves the ETL
+  numbers match the sources without hiding the known discrepancy.
+- **FAA NAS Status is live context only, never scored.** It is real-time and not reproducible.
+
+### Scoring
+- **Target load factor 0.85, sensitivity 0.80.** A common practical ceiling for "full"; the 0.80 case shows
+  how sensitive the capacity gap is to that assumption.
+- **Ranking universe = FAA large/medium/small hubs (142 airports with T-100 data).** Comparable peers;
+  non-hubs distort percentiles.
+- **Mid-rank percentiles against the universe; contributions add up to the score.** Deterministic, robust to
+  outliers and easy to explain component by component.
+- **Investment weights: demand 0.35, growth 0.25, congestion 0.25, scale 0.15.** Demand pressure is the core
+  thesis; scale has the least weight so big hubs don't win by size alone.
+- **Presets: balanced / demand-led (0.50/0.20/0.15/0.15) / congestion-led (0.25/0.15/0.45/0.15); user
+  overrides are merged and renormalised.** Analysts can test their own view; weights are always shown.
+- **Congestion weights: delay 0.35, NAS 0.35, ops per runway 0.20, cancellations 0.10.** Ops per runway is
+  a structural signal but cruder than the delay data, so it gets 20%.
+- **Unmet-demand proxy weights: average LF 0.25, peak LF 0.20, growth 0.20, delay 0.10, NAS 0.15,
+  completion gap 0.10.** True spilled demand is not observable, so the score is labelled a proxy.
+- **The national delay rate is printed next to the airport (e.g. SFO).** Without a benchmark, a delay rate means
+  little.
+- **Regions and aliases are explicit data.** New England = CT, ME, MA, NH, RI, VT. "LA" resolves to LAX,
+  with BUR/LGB/ONT/SNA as alternatives, and the interpretation is always stated.
+
+### Agent
+- **No framework; native tool calling with a small hand-written loop.** 7 tools and one loop; every line
+  is explainable.
+- **7 bundled tools, so each example question needs one tool call.** Fewer round trips mean fewer tokens on
+  an 8K TPM free tier.
+- **Compact LLM views; the full envelope goes to the UI.** These use short source ids, units on every value,
+  precomputed signed differences, ranked drivers, interpretation strings, headlines and official airport
+  names, so the LLM restates rather than calculates.
+- **Memory = last 6 exchanges.** Older answers are truncated to 300 characters, and tool messages are kept only for
+  the latest turn. This keeps follow-ups working within the token budget.
+- **`reasoning_effort=low`, `max_completion_tokens=1000`.** The low and medium efforts gave the same eval
+  quality, and low uses fewer tokens.
+- **TPM pacer (limit read from response headers) plus 429 retry capped at 30 s.** This avoids most 429s, and
+  the user waits a bounded time.
+- **Number traceability check across all turns.** Every number in an answer must trace to a tool output
+  (envelope or LLM view); follow-ups may cite earlier turns.
+- **Grounding check.** Airport codes must be grounded, the answer must not claim tools that were not called,
+  and rank/compare/compute/weight requests need a tool call. If the check fails, there is one retry with
+  `tool_choice="required"`. This fixed the invented re-rank answer.
+- **Follow-up context: the last tool call and its arguments are injected into the user message.** This lets
+  "rank them again…" re-call the tool with the right region.
+- **Prompt rules frozen after the last fixes (`PROMPT_VERSION`).** Further tuning gave diminishing
+  returns; the remaining limits are mitigated in the UI.
+
+### Models (Groq free tier: 8K tokens/min, 200K tokens/day per model)
+- **Default `openai/gpt-oss-120b`.** It scored 7/7 on the eval. After the guardrails it scored 5/5 on completed
+  turns; the rest of that run was blocked by the daily quota.
+- **Fallback `openai/gpt-oss-20b`.** It scored 7/7 with grounding passing. It is used when the primary would wait more
+  than 5 s, or after a primary 429.
+- **Daily quota (TPD) 429 → that model is exhausted for the session; all exhausted → a clear message.**
+  Key facts, Evidence and cached examples still work.
+- **Rejected: `llama-3.3-70b-versatile` (404 for this key) and `qwen/qwen3.8-27b` (malformed tool calls).**
+  Results are in `docs/eval/`.
+- **Known LLM limits:** direction misstatements, mislabelled assumptions, ranking order and airport names.
+  They are mitigated by deterministic Key facts and Evidence, ranking headlines and official names in tool
+  outputs.
+
+### UI
+- **Streamlit with Altair charts.** Key facts and Evidence are built from the tool outputs, not from the LLM
+  text, so the numbers on screen are deterministic.
+- **First-question answer cache only.** It is keyed by question, model, prompt version and data build date,
+  and stored only when an answer has no error, no untraceable numbers and no grounding issues. The demo
+  questions answer instantly without spending quota.
+- **Example questions appear in one place.** They are cards on the empty state and in the sidebar once a
+  conversation exists, so they are never shown twice.
+- **Follow-up suggestions are deterministic.** They are based on the last successful tool call, with at
+  most 3 and none after errors. They are guaranteed to be answerable.
+- **Light theme with a viewer toolbar.** It is a clean demo for analysts.
+- **Voice is beta.** It uses Groq Whisper, and the transcript can be edited before sending so airport codes
+  can be fixed.
+- **The DuckDB file is built automatically (offline) on first run, and the key is read from `.env` or
+  `st.secrets`.** This lets the app run with zero setup locally and on Streamlit Community Cloud.
+
+### Working rules
+- **No scripted edits (Python/PowerShell rewriting files); use the normal edit tool only, and
+  `.gitattributes` sets `eol=lf`.** Scripted edits broke encoding and line endings.
+- **No real-LLM runs (eval_agent.py, chat_cli) unless explicitly asked; use the FakeLLM tests.** This protects
+  the 200K tokens/day quota per model.
+- **Never commit secrets (`.env`, `.streamlit/secrets.toml`), and never modify the user's `.env`.** The repo is
+  public.
+- **Plan first ("PLAN ONLY"), implement after approval.** Before every commit, run `pytest -q`, then restart
+  the app, then commit with the given message and push.
