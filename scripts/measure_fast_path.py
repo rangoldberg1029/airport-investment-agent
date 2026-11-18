@@ -51,7 +51,7 @@ def measure() -> list[dict]:
                      "tokens": result.total_tokens, "flags": len(result.untraceable_numbers),
                      "grounding": result.grounding_issues})
         print(f"{tool:<20} key facts {t_facts * 1000:7.0f} ms | full answer {t_full:5.1f} s | "
-              f"{' + '.join(result.models)}" + (f" (fallback: {result.fallback_reason})" if result.fallback_reason else "")
+              f"{' + '.join(result.models)}" + (f" (failover: {result.fallback_reason})" if result.fallback_reason else "")
               + (f" | ERROR {result.error}" if result.error else ""))
     return rows
 
@@ -64,7 +64,7 @@ def write(rows: list[dict]) -> None:
              "| example | tool | Key facts visible | full answer | model | tokens | checks |",
              "|---|---|---|---|---|---|---|"]
     for r in rows:
-        model = " + ".join(m.split("/")[-1] for m in r["models"]) + (f" (fallback: {r['fallback']})" if r["fallback"] else "")
+        model = " + ".join(m.split("/")[-1] for m in r["models"]) + (f" (failover: {r['fallback']})" if r["fallback"] else "")
         checks = "error: " + r["error"] if r["error"] else (
             "grounding FAILED" if r["grounding"] else f"passed, {r['flags']} untraceable numbers")
         lines.append(f"| {r['question']} | `{r['tool']}` | {r['facts'] * 1000:.0f} ms | {r['full']:.1f} s | {model} | "

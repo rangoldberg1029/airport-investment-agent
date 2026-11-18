@@ -32,7 +32,8 @@ LLM can cite them.
 ```
 Streamlit chat UI  (app.py)
       │
-Agent loop         (agent/agent.py)    OpenAI-compatible client, native tool calling, no framework
+Agent loop         (agent/agent.py)    native tool calling, no framework; computed Answer line (agent/headlines.py)
+      │                                LLM client (agent/llm.py): Gemini, optional Groq failover
       │
 Tools              (agent/tools.py)    thin wrappers -> JSON-serializable dicts
       │
@@ -45,18 +46,21 @@ Public sources     BTS (data.bts.gov SODA API / TranStats), FAA, OurAirports, FA
 
 ### Harness choice — free LLM via an OpenAI-compatible API + our own small tool loop
 Constraint: **zero cost**. No paid services anywhere in the project.
-- We use the `openai` Python package only as a generic client, pointed at FREE providers' OpenAI-compatible
-  endpoints. Primary: **Google AI Studio, `gemini-3.5-flash-lite`** (free tier, no card). Only fallback:
-  **Groq, `openai/gpt-oss-120b`** (free tier). See `agent/llm.py` and `docs/eval/model_comparison.md`.
-- Provider-agnostic = no vendor lock-in: any OpenAI-compatible endpoint works via env vars.
-- No LangChain/LangGraph: ~5 tools and one loop; a framework adds abstraction without value here.
+- We use the `openai` Python package only as a generic client for FREE providers' OpenAI-compatible
+  endpoints. Language model: **Google AI Studio, `gemini-3.5-flash-lite`** (free tier, no card). Optional:
+  **Groq, `openai/gpt-oss-120b`** (free tier) for automatic failover, plus Whisper on Groq for voice input.
+  See `agent/llm.py` and `docs/eval/model_comparison.md`.
+- Provider-agnostic = no vendor lock-in: both providers use the same OpenAI-compatible client code.
+- No LangChain/LangGraph: 7 tools and one loop; a framework adds abstraction without value here.
 - Full transparency: every tool call is logged and shown in the UI; easy to explain in the interview.
-- Tradeoffs: free tiers have low rate limits (requests/tokens per minute) → keep tool outputs
-  compact, keep the system prompt short, retry with backoff on HTTP 429, show a friendly
-  message if the limit is hit. Open models are somewhat weaker than frontier models at tool
-  choice → this is mitigated because all numbers come from deterministic tools anyway.
-- Env vars: `GEMINI_API_KEY`, `LLM_MODEL` (primary); `LLM_API_KEY`, `LLM_BASE_URL`
-  (default `https://api.groq.com/openai/v1`), `LLM_FALLBACK_MODEL` (fallback). See `.env.example`.
+- Tradeoffs: free tiers have rate limits (requests/tokens per minute and per day) → keep tool outputs
+  compact, keep the system prompt short, pace calls, fail over to Groq, show a friendly message if every
+  model is out of quota. Smaller models are weaker at tool choice and explanation → mitigated because all
+  numbers come from deterministic tools and the Answer line is computed by code.
+- Configuration (`.env` locally, Streamlit secrets when deployed; see `.env.example` and
+  `.streamlit/secrets.toml.example`): `GEMINI_API_KEY` (required), `GEMINI_MODEL` (default
+  `gemini-3.5-flash-lite`), `GROQ_API_KEY` (optional: voice + failover), `GROQ_MODEL` (default
+  `openai/gpt-oss-120b`). Base URLs, reasoning levels, limits and timeouts are constants in `agent/llm.py`.
 
 ## Data sources (verify each in the data spike before building on it)
 | Source | Use | Access |
@@ -86,7 +90,8 @@ All computed per airport over a trailing 12-month window (state the window in ev
   True unmet (spilled) demand is NOT directly observable — always say so.
 - **Investment Score (0–100)** = weighted sum of percentile-normalized components:
   demand pressure (LF), growth, congestion (delay rate + NAS share), scale (enplanements).
-  Weights live in `scoring/config.py`, are shown in answers, and can be overridden by the user.
+  Weights live in `scoring/config.py` as named presets, are shown in answers, and can be overridden by the
+  user with explicit numbers.
 
 ## Repo layout
 ```
@@ -108,7 +113,7 @@ All computed per airport over a trailing 12-month window (state the window in ev
 ├── DESIGN.md
 ├── README.md
 ├── requirements.txt
-├── .env.example           # GEMINI_API_KEY=, LLM_MODEL=, LLM_API_KEY=, LLM_BASE_URL=, LLM_FALLBACK_MODEL=
+├── .env.example           # GEMINI_API_KEY= (required), GROQ_API_KEY= (optional), model names (optional)
 └── .gitignore             # .env, data/*.duckdb, __pycache__, .venv
 ```
 
@@ -167,8 +172,12 @@ One line of reasoning per decision. Values live in `scoring/config.py`; change t
   outliers and easy to explain component by component.
 - **Investment weights: demand 0.35, growth 0.25, congestion 0.25, scale 0.15.** Demand pressure is the core
   thesis; scale has the least weight so big hubs don't win by size alone.
-- **Presets: balanced / demand-led (0.50/0.20/0.15/0.15) / congestion-led (0.25/0.15/0.45/0.15); user
-  overrides are merged and renormalised.** Analysts can test their own view; weights are always shown.
+- **Named weight presets (demand/growth/congestion/scale): balanced 0.35/0.25/0.25/0.15 (default),
+  demand-led 0.50/0.20/0.15/0.15, congestion-led 0.25/0.15/0.45/0.15, growth-led 0.25/0.45/0.15/0.15,
+  scale-led 0.25/0.15/0.15/0.45.** "Weight growth higher" → `rank_airports(preset="growth-led")`, so the same
+  question always gives the same ranking. Custom weights only when the user gives numbers (merged into the
+  preset and renormalised). The preset name and weights are shown in the Answer line and Key facts; all
+  presets are used for the rank-stability check.
 - **Congestion weights: delay 0.35, NAS 0.35, ops per runway 0.20, cancellations 0.10.** Ops per runway is
   a structural signal but cruder than the delay data, so it gets 20%.
 - **Unmet-demand proxy weights: average LF 0.25, peak LF 0.20, growth 0.20, delay 0.10, NAS 0.15,
@@ -181,8 +190,8 @@ One line of reasoning per decision. Values live in `scoring/config.py`; change t
 ### Agent
 - **No framework; native tool calling with a small hand-written loop.** 7 tools and one loop; every line
   is explainable.
-- **7 bundled tools, so each example question needs one tool call.** Fewer round trips mean fewer tokens on
-  an 8K TPM free tier.
+- **7 bundled tools, so each example question needs one tool call.** Fewer round trips mean fewer tokens and
+  faster answers on free tiers.
 - **Compact LLM views; the full envelope goes to the UI.** These use short source ids, units on every value,
   precomputed signed differences, ranked drivers, interpretation strings, headlines and official airport
   names, so the LLM restates rather than calculates.
@@ -191,7 +200,8 @@ One line of reasoning per decision. Values live in `scoring/config.py`; change t
 - **Lowest reasoning level that works (Gemini `minimal`, Groq `low`), max 1,000 output tokens per call.**
   Fewer hidden tokens, same eval quality.
 - **Pacing from the provider's rate-limit headers when sent (Groq; cached tokens don't count), else a local
-  per-minute window of tokens and requests (Gemini); 429 retry capped at 30 s.** Avoids most 429s; bounded waits.
+  per-minute window of tokens and requests (Gemini); without failover, 429 retries are capped at 30 s.**
+  Avoids most 429s; bounded waits.
 - **Deterministic Answer line + LLM "Why / drivers" bullets (max 4).** Code builds the core answer from the tool
   output (`agent/headlines.py`), so rank order, names, which index is higher, shares and scores are always
   correct; the number and grounding checks run on the LLM part.
@@ -209,18 +219,24 @@ One line of reasoning per decision. Values live in `scoring/config.py`; change t
   score UP only if its contribution is positive; never call negative growth a driver; use "raises X" /
   "lowers X". Further tuning gave diminishing returns; the remaining limits are mitigated in the UI.
 
-### Models (details and numbers: `docs/eval/model_comparison.md`, final report: `docs/eval/eval_results.md`)
-- **Primary `gemini-3.5-flash-lite` (Google AI Studio free tier, thinking `minimal`).** ~30x Groq's per-minute
-  budget (no pacing waits) and keeps Groq's daily quota for the fallback. Latest stable Flash-Lite in the
-  models list. Final eval: 7/7 tool choice, 0 grounding failures, 0 untraceable numbers, ~7.5 s per typed turn.
-- **Only fallback `openai/gpt-oss-120b` on Groq.** Used on HTTP 429, 5xx, timeout (20 s) or connection error,
-  or when Gemini would wait > 5 s; one switch per turn, reason shown in the "Done" line. Added after a real
-  Gemini 503 failed an eval turn. gpt-oss-20b is no longer used.
-- **Daily quota 429 → that model is exhausted for the session; all exhausted → a clear message.**
+### Models (details and numbers: `docs/eval/model_comparison.md`, eval report: `docs/eval/eval_results.md`)
+- **Language model `gemini-3.5-flash-lite` (Google AI Studio free tier, thinking `minimal`).** ~250K tokens/min
+  means no pacing waits; latest stable Flash-Lite in Google's models list; 7/7 tool choice, 0 grounding
+  failures, 0 untraceable numbers in the eval.
+- **One required key, one optional.** `GEMINI_API_KEY` is required. `GROQ_API_KEY` adds voice input and
+  failover to `openai/gpt-oss-120b`; without it, everything except voice works, with no failover (sidebar:
+  "Voice input requires GROQ_API_KEY"). Only `GROQ_API_KEY` set → the app runs on Groq alone. Neither → the
+  setup card.
+- **Error policy:** Gemini 429 → Groq immediately; Gemini 5xx, timeout (20 s) or connection error → one retry
+  after 2 s, then Groq; Gemini would wait > 5 s for its rate limit → Groq. Once on Groq, the rest of the turn
+  stays there. The "Done" line names the model that answered (and the failover reason). Free-tier servers do
+  return 5xx (seen in the evals), so one retry recovers most of them without switching models.
+- **Daily quota 429 → that model is skipped for the session; all exhausted → a clear message.**
   Key facts, Evidence and cached examples still work.
-- **Rejected: `llama-3.3-70b-versatile` (404 for this key) and `qwen/qwen3.8-27b` (malformed tool calls).**
-- **Known LLM limits:** direction wording and weak explanations in the bullets. The core answer can no longer
-  be wrong (computed Answer line); Key facts and Evidence are deterministic.
+- **Not used: `qwen/qwen3.8-27b` (malformed tool calls) and `llama-3.3-70b-versatile` (not available on the
+  evaluation key).**
+- **Known LLM limits:** direction wording and weak explanations in the bullets. The core answer cannot be
+  misquoted (computed Answer line); Key facts and Evidence are deterministic.
 
 ### UI
 - **Streamlit with Altair charts.** Key facts and Evidence are built from the tool outputs, not from the LLM
@@ -233,9 +249,11 @@ One line of reasoning per decision. Values live in `scoring/config.py`; change t
 - **Follow-up suggestions are deterministic.** They are based on the last successful tool call, with at
   most 3 and none after errors. They are guaranteed to be answerable.
 - **Light theme with a viewer toolbar.** It is a clean demo for analysts.
-- **Voice is beta.** It uses Groq Whisper, and the transcript can be edited before sending so airport codes
-  can be fixed.
-- **The DuckDB file is built automatically (offline) on first run, and the key is read from `.env` or
+- **Voice is beta and needs `GROQ_API_KEY`.** It uses Whisper on Groq, and the transcript can be edited
+  before sending so airport codes can be fixed.
+- **The About panel and sidebar describe the active setup** (language model, failover on/off, voice on/off),
+  generated from the configuration so they cannot go stale.
+- **The DuckDB file is built automatically (offline) on first run, and the keys are read from `.env` or
   `st.secrets`.** This lets the app run with zero setup locally and on Streamlit Community Cloud.
 
 ### Working rules

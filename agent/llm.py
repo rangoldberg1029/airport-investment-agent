@@ -1,10 +1,19 @@
-"""LLM client: OpenAI-compatible chat with tool calling, one primary and one fallback provider, rate-limit
-pacing and HTTP 429 handling.
+"""LLM client: OpenAI-compatible chat with tool calling over a primary and an optional failover provider, with
+rate-limit pacing, retries and failover.
 
-Providers (both free tiers, both reached through their OpenAI-compatible endpoints):
-  primary  = Google Gemini Flash-Lite: GEMINI_API_KEY, model LLM_MODEL, base GEMINI_BASE_URL
-  fallback = Groq: LLM_API_KEY, LLM_BASE_URL, model LLM_FALLBACK_MODEL (default openai/gpt-oss-120b)
-Without GEMINI_API_KEY, Groq is the only provider.
+Configuration (environment or Streamlit secrets; everything else is a constant below):
+  GEMINI_API_KEY  required  primary model: Google Gemini (free tier)
+  GEMINI_MODEL    optional  default gemini-3.5-flash-lite
+  GROQ_API_KEY    optional  enables failover to Groq (and voice input, see agent/speech.py)
+  GROQ_MODEL      optional  default openai/gpt-oss-120b
+Only GROQ_API_KEY set: Groq is the only provider.
+
+Error policy (per LLM call):
+  Gemini 429 (per-minute or daily limit)        -> Groq immediately
+  Gemini 5xx, timeout or connection error       -> retry Gemini once after SERVER_RETRY_DELAY_S -> then Groq
+  Gemini would wait > FALLBACK_AFTER_S for its rate limit                  -> Groq
+Once a turn has switched to Groq it stays there for the rest of that turn. Without Groq, 429s are retried
+with backoff and a 5xx/timeout is retried once; then the turn shows an error.
 """
 
 import json
@@ -20,6 +29,14 @@ GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
+GEMINI_REASONING = "minimal"        # lowest Gemini 3 thinking level
+GROQ_REASONING = "low"              # gpt-oss reasoning effort
+GEMINI_TPM, GEMINI_RPM = 250_000, 15     # free-tier limits, paced locally (Gemini sends no rate-limit headers)
+GROQ_TPM = 8_000                    # replaced by Groq's x-ratelimit-limit-tokens header after the first call
+GEMINI_TIMEOUT_S, GROQ_TIMEOUT_S = 20.0, 60.0
+SERVER_RETRY_DELAY_S = 2.0          # wait before the one retry after a 5xx / timeout
+FALLBACK_AFTER_S = 5.0              # switch instead of waiting longer than this for the primary's rate limit
+MAX_OUTPUT_TOKENS = 1000            # per call, incl. hidden reasoning tokens (eval answers <= ~600)
 # Gemini 3 validates "thought signatures" on function calls in the conversation. Calls it did not produce itself
 # (the app's direct tool calls, or calls made by the Groq fallback) carry Google's documented placeholder.
 GEMINI_PLACEHOLDER_SIGNATURE = "skip_thought_signature_validator"
@@ -76,6 +93,24 @@ def is_daily_limit(exc: Exception) -> bool:
     text = str(exc).lower()
     return is_rate_limit(exc) and any(k in text for k in ("tokens per day", "(tpd)", "requests per day",
                                                            "perday", "per day"))
+
+
+def is_server_error(exc: Exception) -> bool:
+    """5xx, timeout or connection error: worth one retry of the same provider."""
+    reason = unavailable_reason(exc)
+    return reason is not None and not reason.startswith("rate limit")
+
+
+def with_server_retry(fn: Callable[[], Any], sleep: Callable[[float], None] = time.sleep,
+                      delay: float = SERVER_RETRY_DELAY_S) -> Any:
+    """Call fn; after a 5xx / timeout / connection error wait `delay` seconds and call it once more."""
+    try:
+        return fn()
+    except Exception as exc:
+        if not is_server_error(exc):
+            raise
+        sleep(delay)
+        return fn()
 
 
 def unavailable_reason(exc: Exception) -> str | None:
@@ -271,13 +306,12 @@ def prepare_messages(messages: list[dict], gemini: bool) -> list[dict]:
 
 @dataclass
 class Provider:
-    name: str                     # "gemini" | "groq" | ...
+    name: str                     # "gemini" | "groq"
     model: str
     base_url: str
     client: Any                   # openai.OpenAI, or a stub in tests
     effort: str | None            # reasoning effort sent with each call (None = not sent)
     pacer: TpmPacer
-    fixed_limit: bool = False     # True = TPM limit set explicitly; do not take it from response headers
 
     @property
     def is_gemini(self) -> bool:
@@ -290,44 +324,41 @@ def _effort_for(model: str, effort: str | None) -> str | None:
 
 
 def make_provider(name: str, model: str, base_url: str, api_key: str | None = None, effort: str | None = None,
-                  tpm_limit: int = 8000, rpm_limit: int | None = None, fixed_limit: bool = False,
+                  tpm_limit: int = GROQ_TPM, rpm_limit: int | None = None,
                   sleep: Callable[[float], None] = time.sleep, client: Any = None,
-                  timeout_s: float = 60.0) -> Provider:
+                  timeout_s: float = GROQ_TIMEOUT_S) -> Provider:
     if client is None:
         from openai import OpenAI
 
         client = OpenAI(api_key=api_key or "not-set", base_url=base_url, max_retries=0,   # retries handled here
                         timeout=timeout_s)
     return Provider(name, model, base_url, client, _effort_for(model, effort),
-                    TpmPacer(limit=tpm_limit, rpm_limit=rpm_limit, sleep=sleep), fixed_limit)
+                    TpmPacer(limit=tpm_limit, rpm_limit=rpm_limit, sleep=sleep))
 
 
-def providers_from_env(sleep: Callable[[float], None] = time.sleep) -> tuple[Provider, Provider | None]:
-    """(primary, fallback) from environment variables; see the module docstring."""
-    groq_limit = os.getenv("LLM_FALLBACK_TPM_LIMIT")
-    groq = dict(name="groq", model=os.getenv("LLM_FALLBACK_MODEL") or DEFAULT_GROQ_MODEL,
-                base_url=os.getenv("LLM_BASE_URL") or GROQ_BASE_URL, api_key=os.getenv("LLM_API_KEY"),
-                effort=os.getenv("LLM_FALLBACK_REASONING_EFFORT", "low"),
-                tpm_limit=int(groq_limit or 8000), fixed_limit=bool(groq_limit), sleep=sleep)
-    if not os.getenv("GEMINI_API_KEY"):
-        return make_provider(**groq), None
-    model = os.getenv("LLM_MODEL") or DEFAULT_GEMINI_MODEL
-    if not model.startswith("gemini"):          # a Groq model name left over from the Groq-only setup
-        model = DEFAULT_GEMINI_MODEL
-    limit = os.getenv("LLM_TPM_LIMIT")
-    primary = make_provider("gemini", model, os.getenv("GEMINI_BASE_URL") or GEMINI_BASE_URL,
-                            os.getenv("GEMINI_API_KEY"), os.getenv("LLM_REASONING_EFFORT", "minimal"),
-                            tpm_limit=int(limit or 250_000), rpm_limit=int(os.getenv("LLM_RPM_LIMIT", "15")),
-                            fixed_limit=bool(limit), sleep=sleep,
-                            # a hanging primary call switches to the fallback instead of blocking the turn
-                            timeout_s=float(os.getenv("LLM_TIMEOUT_S", "20")))
-    return primary, (make_provider(**groq) if os.getenv("LLM_API_KEY") else None)
+def gemini_provider(api_key: str, model: str | None = None, **kw) -> Provider:
+    return make_provider("gemini", model or DEFAULT_GEMINI_MODEL, GEMINI_BASE_URL, api_key, GEMINI_REASONING,
+                         tpm_limit=GEMINI_TPM, rpm_limit=GEMINI_RPM, timeout_s=GEMINI_TIMEOUT_S, **kw)
+
+
+def groq_provider(api_key: str, model: str | None = None, **kw) -> Provider:
+    return make_provider("groq", model or DEFAULT_GROQ_MODEL, GROQ_BASE_URL, api_key, GROQ_REASONING,
+                         tpm_limit=GROQ_TPM, timeout_s=GROQ_TIMEOUT_S, **kw)
+
+
+def providers_from_env(sleep: Callable[[float], None] = time.sleep) -> tuple[Provider | None, Provider | None]:
+    """(primary, failover) from GEMINI_API_KEY / GEMINI_MODEL / GROQ_API_KEY / GROQ_MODEL:
+    both keys -> (Gemini, Groq); Gemini only -> (Gemini, None); Groq only -> (Groq, None); none -> (None, None)."""
+    gemini_key, groq_key = os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY")
+    gemini = gemini_provider(gemini_key, os.getenv("GEMINI_MODEL"), sleep=sleep) if gemini_key else None
+    groq = groq_provider(groq_key, os.getenv("GROQ_MODEL"), sleep=sleep) if groq_key else None
+    return (gemini, groq) if gemini else (groq, None)
 
 
 # ---------------------------------------------------------------- client
 
 class PrimaryUnavailable(Exception):
-    """Internal: the primary provider failed in a way the fallback can help with (see unavailable_reason)."""
+    """Internal: the primary provider failed in a way the fallback can help with (see the module docstring)."""
 
     def __init__(self, reason: str):
         super().__init__(reason)
@@ -335,18 +366,17 @@ class PrimaryUnavailable(Exception):
 
 
 class OpenAIChat:
-    """Chat client over a primary and an optional fallback provider.
+    """Chat client over a primary and an optional fallback provider; error policy in the module docstring.
 
-    The fallback is used when the primary would have to wait more than `fallback_after_s` for its rate limit,
-    or fails with HTTP 429, a 5xx server error, a timeout or a connection error. At most one switch per turn:
-    once switched, the rest of the turn stays on the fallback (`start_turn` resets this; `switch_reason`
-    says why it happened, for the UI). Daily quota: a model that returns a per-day 429 is marked exhausted for
-    the rest of this client's life (one client per UI session); when every model is exhausted, QuotaExhausted
-    is raised.
+    At most one switch per turn: once switched, the rest of the turn stays on the fallback (`start_turn`
+    resets this; `switch_reason` says why it happened, for the "Done" line). Daily quota: a model that returns
+    a per-day 429 is marked exhausted for the rest of this client's life (one client per UI session); when
+    every model is exhausted, QuotaExhausted is raised.
     """
 
     def __init__(self, primary: Provider, fallback: Provider | None = None, sleep: Callable[[float], None] = time.sleep,
-                 fallback_after_s: float = 5.0, max_output_tokens: int | None = None, temperature: float = 0.2):
+                 fallback_after_s: float = FALLBACK_AFTER_S, max_output_tokens: int = MAX_OUTPUT_TOKENS,
+                 temperature: float = 0.2):
         self.primary = primary
         self.fallback = fallback if fallback and fallback.model != primary.model else None
         self.providers = [p for p in (self.primary, self.fallback) if p]
@@ -355,13 +385,14 @@ class OpenAIChat:
         self.set_sleep(sleep)
         self.exhausted: set[str] = set()               # models that hit their daily quota in this session
         self.switch_reason: str | None = None          # why this turn switched to the fallback (None = it did not)
-        # Cap per LLM call, including hidden reasoning tokens. Answers in the evals were <= ~600 tokens.
-        self.max_output_tokens = max_output_tokens or int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "1000"))
+        self.max_output_tokens = max_output_tokens
         self.temperature = temperature
 
     @classmethod
     def from_env(cls, use_fallback: bool = True, **kwargs) -> "OpenAIChat":
         primary, fallback = providers_from_env()
+        if primary is None:
+            raise ValueError("No LLM API key: set GEMINI_API_KEY (and optionally GROQ_API_KEY).")
         return cls(primary, fallback if use_fallback else None, **kwargs)
 
     # -------------------------------------------------- what the UI and scripts read
@@ -461,17 +492,27 @@ class OpenAIChat:
         kwargs = self._kwargs(provider, messages, tools, tool_choice)
         request = lambda: self._request(provider, kwargs)  # noqa: E731
         if provider is self.primary and self.fallback and self.fallback.model not in self.exhausted:
-            try:                     # primary with a usable fallback: no retry, switch on 429 / 5xx / timeout
-                raw = request()
-            except Exception as exc:
-                if is_daily_limit(exc):
-                    self.exhausted.add(provider.model)   # out for today: fallback for the rest of the session
-                reason = unavailable_reason(exc)
-                if reason:
-                    raise PrimaryUnavailable(f"{provider.name} {reason}") from exc
-                raise
+            # Primary with a usable fallback: 429 -> switch now; 5xx/timeout -> one retry, then switch.
+            server_errors = 0
+            while True:
+                try:
+                    raw = request()
+                    break
+                except Exception as exc:
+                    if is_daily_limit(exc):
+                        self.exhausted.add(provider.model)   # out for today: fallback for the rest of the session
+                    reason = unavailable_reason(exc)
+                    if reason is None:
+                        raise
+                    if is_server_error(exc) and server_errors == 0:
+                        server_errors += 1
+                        self.sleep(SERVER_RETRY_DELAY_S)
+                        continue
+                    retried = ", after 1 retry" if server_errors else ""
+                    raise PrimaryUnavailable(f"{provider.name} {reason}{retried}") from exc
         else:
-            raw = with_retry(request, sleep=self.sleep)
+            # No fallback (or this is the fallback): 429 -> backoff retries; 5xx/timeout -> one retry.
+            raw = with_retry(lambda: with_server_retry(request, self.sleep), sleep=self.sleep)
         self._observe(provider, raw.headers)
         resp = raw.parse()
         usage = resp.usage
@@ -491,8 +532,7 @@ class OpenAIChat:
     @staticmethod
     def _observe(provider: Provider, headers) -> None:
         """Take the real per-model TPM limit and the remaining budget from the response headers, if sent."""
-        if not provider.fixed_limit:
-            limit = _number(headers, "x-ratelimit-limit-tokens")
-            if limit:
-                provider.pacer.limit = int(limit)
+        limit = _number(headers, "x-ratelimit-limit-tokens")
+        if limit:
+            provider.pacer.limit = int(limit)
         provider.pacer.observe(headers)

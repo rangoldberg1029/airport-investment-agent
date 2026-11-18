@@ -132,3 +132,19 @@ def test_about_text_is_generated_from_config(frames):
     assert "| ID | Source | Access | Period | Used for |" in text
     assert "Sep 2024 – Aug 2026" in text and "2024-09..2026-08" not in text        # readable periods
     assert "Every number is computed by deterministic Python" in text
+    assert "growth-led" in text and "Google Gemini `gemini-3.5-flash-lite`" in text
+
+
+@pytest.mark.parametrize("keys,expected", [
+    ({"GEMINI_API_KEY": "g", "GROQ_API_KEY": "q"}, "Voice input and failover are **on**."),
+    ({"GEMINI_API_KEY": "g"}, "Voice input and failover are **off** (no `GROQ_API_KEY`)."),
+    ({"GROQ_API_KEY": "q"}, "Running on **Groq only**"),
+    ({}, ""),
+])
+def test_about_panel_describes_the_configured_setup(monkeypatch, keys, expected):
+    from ui.render import setup_status
+    for k in ("GEMINI_API_KEY", "GROQ_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in keys.items():
+        monkeypatch.setenv(k, v)
+    assert setup_status().strip().startswith(expected) if expected else setup_status() == ""

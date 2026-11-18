@@ -1,8 +1,9 @@
-"""Smoke test: verify the configured free LLM providers (primary and fallback) support tool calling.
+"""Smoke test: verify the configured free LLM providers (Gemini and, if GROQ_API_KEY is set, Groq) support
+tool calling.
 
 Usage:  python scripts/check_llm.py
-Reads the provider settings from .env (see .env.example and agent/llm.py) and sends one chat request per
-provider with a single dummy tool (get_time). Passes if each model returns a tool call.
+Reads GEMINI_API_KEY / GEMINI_MODEL / GROQ_API_KEY / GROQ_MODEL from .env (see .env.example) and sends one chat
+request per provider with a single dummy tool (get_time). Passes if each model returns a tool call.
 """
 
 import json
@@ -27,7 +28,7 @@ TOOLS = [{"type": "function", "function": {
 QUESTION = [{"role": "user", "content": "What time is it in New York? Use the tool."}]
 
 failed = False
-for role, provider in zip(("Primary", "Fallback"), providers_from_env()):
+for role, provider in zip(("Primary", "Failover"), providers_from_env()):
     if provider is None:
         print(f"{role}: not configured")
         continue

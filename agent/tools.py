@@ -16,7 +16,7 @@ from data.sources import nas_status
 from scoring import metrics, ranking
 from scoring.common import envelope, month_label, resolve_airport, window_label
 from scoring.config import (
-    CONGESTION_WEIGHTS, DEFAULT_LONG_HAUL_MI, INVESTMENT_WEIGHTS, LOAD_FACTOR_SENSITIVITY,
+    CONGESTION_WEIGHTS, DEFAULT_LONG_HAUL_MI, DEFAULT_PRESET, INVESTMENT_WEIGHTS, LOAD_FACTOR_SENSITIVITY,
     LONG_HAUL_THRESHOLDS_MI, MIN_COMMERCIAL_RUNWAY_FT, PRIOR_WINDOW, RANKING_UNIVERSE_HUBS,
     REGIONS, SOURCE_LABELS, TARGET_LOAD_FACTOR, UNMET_DEMAND_WEIGHTS, WEIGHT_PRESETS, WINDOW,
 )
@@ -63,11 +63,11 @@ def labelled(frames: Frames, iata: str) -> str:
 
 
 def weights_label(weights: dict) -> str:
-    """'default weights' or e.g. 'growth-weighted' (the component with the largest custom weight)."""
-    if all(abs(weights[k] - INVESTMENT_WEIGHTS[k]) < 1e-9 for k in INVESTMENT_WEIGHTS):
-        return "default weights"
-    top = max(weights, key=weights.get)
-    return f"{top.replace('_', ' ')}-weighted"
+    """'preset growth-led (demand pressure 25%, growth 45%, congestion 15%, scale 15%)',
+    'preset balanced (default) (...)' or 'custom weights (...)'."""
+    name = ranking.preset_of(weights)
+    head = "custom weights" if name is None else f"preset {name}" + (" (default)" if name == DEFAULT_PRESET else "")
+    return f"{head} (" + ", ".join(f"{k.replace('_', ' ')} {v:.0%}" for k, v in weights.items()) + ")"
 
 
 def merge(parts: list[dict], data: dict, period: str | None = None) -> dict:
@@ -268,7 +268,8 @@ def get_airport_profile(frames: Frames, airport: str) -> tuple[dict, dict]:
 
 
 def rank_airports(frames: Frames, region: str | None = None, states: list[str] | None = None,
-                  airports: list[str] | None = None, weights: dict | None = None, top_n: int = 5) -> tuple[dict, dict]:
+                  airports: list[str] | None = None, weights: dict | None = None, top_n: int = 5,
+                  preset: str | None = None) -> tuple[dict, dict]:
     notes = []
     if airports:
         resolved = []
@@ -278,7 +279,8 @@ def rank_airports(frames: Frames, region: str | None = None, states: list[str] |
             if note:
                 notes.append(note)
         airports = resolved
-    inv = ranking.investment_scores(frames, region=region, states=states, airports=airports, weights=weights)
+    inv = ranking.investment_scores(frames, region=region, states=states, airports=airports, weights=weights,
+                                    preset=preset)
     stab = ranking.rank_stability(frames, region=region, states=states, airports=airports, top_n=3)
     rows = inv["data"]["ranking"]
     table = []
@@ -291,7 +293,7 @@ def rank_airports(frames: Frames, region: str | None = None, states: list[str] |
                       uc("congestion", raw["congestion"]), uc("scale", raw["scale"]),
                       [f"{c['contribution']} pts" for c in r["components"]],
                       u(diff(r["investment_score"], nxt, 1), "pts")])
-    headline = (f"Ranking ({weights_label(inv['data']['weights'])}): "
+    headline = (f"Ranking with {weights_label(inv['data']['weights'])}: "
                 + "; ".join(f"{r['rank']}. {labelled(frames, r['airport'])} {r['investment_score']}"
                             for r in rows[:top_n])) if rows else "No airport in this selection is ranked."
     data = {
@@ -301,6 +303,7 @@ def rank_airports(frames: Frames, region: str | None = None, states: list[str] |
         "rows": table,
         "n_more": max(0, len(rows) - top_n),
         "ranked_nationally": inv["data"]["ranked_nationally"],
+        "preset": inv["data"]["preset"] or "custom",
         "weights": inv["data"]["weights"],
         "outside_ranking_universe": [labelled(frames, o["airport"]) for o in inv["data"]["outside_ranking_universe"]],
         "stability_top3": stab["data"]["rankings"],
@@ -475,9 +478,10 @@ def explain_methodology(frames: Frames, topic: str = "all") -> tuple[dict, dict]
         "investment_score": {
             "formula": "sum(weight x percentile) over demand_pressure (load factor), growth (YoY passengers), "
                        "congestion (congestion index), scale (passengers); 0-100",
-            "weights": INVESTMENT_WEIGHTS, "presets_for_stability": WEIGHT_PRESETS,
+            "weights": INVESTMENT_WEIGHTS, "default_preset": DEFAULT_PRESET, "presets": WEIGHT_PRESETS,
+            "presets_use": "named presets give deterministic re-rankings and are used to test rank stability",
             "ranking_universe": f"FAA hubs {'/'.join(RANKING_UNIVERSE_HUBS)}; percentiles national",
-            "override": "user can override any weight; weights are renormalised to sum 1",
+            "override": "explicit user-given weights override the preset; renormalised to sum 1",
         },
         "congestion": {
             "formula": "sum(weight x percentile) of delay rate, NAS delay share, operations per runway, "
@@ -529,11 +533,14 @@ TOOL_SCHEMAS = [
         "index and investment score with national rank.", {"airport": AIRPORT}, ["airport"]),
     _fn("rank_airports",
         "Rank US airports by investment score (terminal/capacity expansion case) for a region, states or "
-        "airport list, with rank stability across weight presets. Use weights to re-rank.",
+        "airport list, with rank stability across weight presets.",
         {"region": {"type": "string", "enum": sorted(REGIONS)},
          "states": {"type": "array", "items": {"type": "string"}, "description": "2-letter state codes"},
          "airports": {"type": "array", "items": {"type": "string"}},
-         "weights": {"type": "object", "description": "partial override, keys: demand_pressure, growth, congestion, scale",
+         "preset": {"type": "string", "enum": list(WEIGHT_PRESETS),
+                    "description": "Use for re-ranking requests, e.g. 'weight growth higher' -> growth-led, "
+                                   "'default weights' -> balanced"},
+         "weights": {"type": "object", "description": "ONLY if the user gives explicit numbers; partial override",
                      "properties": {k: {"type": "number"} for k in INVESTMENT_WEIGHTS}},
          "top_n": {"type": "integer", "default": 5}}, []),
     _fn("compare_congestion",

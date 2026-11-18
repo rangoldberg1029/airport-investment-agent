@@ -69,6 +69,8 @@ with st.sidebar:
     st.subheader("Ask by voice (beta)")
     if not api_key:
         st.caption("Available once the API key is configured.")
+    elif not setup.voice_available():
+        st.caption("Voice input requires GROQ_API_KEY")
     elif not hasattr(st, "audio_input"):
         st.caption("Voice input needs a newer Streamlit version.")
     else:
@@ -102,10 +104,11 @@ with st.sidebar:
 # ---------------------------------------------------------------- setup notice
 if not api_key:
     st.info("**Setup needed: no LLM API key found.**\n\n"
-            "1. Create free API keys: Google AI Studio (aistudio.google.com, primary) and/or Groq "
-            "(console.groq.com, fallback).\n"
-            "2. Copy `.env.example` to `.env` and set `GEMINI_API_KEY=...` and/or `LLM_API_KEY=...` "
-            "(or add them to Streamlit secrets when deployed).\n"
+            "1. Create a free Google AI Studio key (aistudio.google.com/apikey). Optional: a free Groq key "
+            "(console.groq.com/keys) for voice input and automatic failover.\n"
+            "2. Copy `.env.example` to `.env` and set `GEMINI_API_KEY=...` (required) and `GROQ_API_KEY=...` "
+            "(optional). When deployed, add the same keys to Streamlit secrets "
+            "(see `.streamlit/secrets.toml.example`).\n"
             "3. Restart the app: `streamlit run app.py`.\n\n"
             "The data and methodology above are available without a key.")
 

@@ -1,12 +1,12 @@
-"""LLM client without network: 429 retry, pacing (provider headers or local window), primary/fallback routing,
-provider-specific request details (Gemini vs Groq), configuration from the environment."""
+"""LLM client without network: 429 retry, pacing (provider headers or local window), the Gemini -> Groq error
+policy, provider-specific request details (Gemini vs Groq), configuration from the environment."""
 
 import pytest
 
 from agent.llm import (
     DEFAULT_GEMINI_MODEL, DEFAULT_GROQ_MODEL, GEMINI_BASE_URL, GEMINI_PLACEHOLDER_SIGNATURE, GROQ_BASE_URL,
-    LLMResponse, OpenAIChat, RateLimited, TpmPacer, make_provider, parse_duration, prepare_messages,
-    providers_from_env, with_retry,
+    SERVER_RETRY_DELAY_S, LLMResponse, OpenAIChat, RateLimited, TpmPacer, make_provider, parse_duration,
+    prepare_messages, providers_from_env, with_retry,
 )
 
 
@@ -251,14 +251,6 @@ def test_tool_call_extra_content_is_returned():
 
 # ---------------------------------------------------------------- routing primary -> fallback
 
-def test_fallback_on_primary_429_without_retrying_primary():
-    g, q = _Seq([Http429(retry_after="40")]), _Seq([_raw("from fallback")])
-    client = client_with(gemini(g), groq(q))
-    resp = client.complete(HI, tools=[])
-    assert resp.content == "from fallback" and resp.model == DEFAULT_GROQ_MODEL
-    assert g.models == [DEFAULT_GEMINI_MODEL] and q.models == [DEFAULT_GROQ_MODEL]
-
-
 def test_fallback_when_primary_would_wait_too_long():
     g, q = _Seq([]), _Seq([_raw("fast")])
     client = client_with(gemini(g), groq(q))
@@ -276,52 +268,89 @@ class APITimeoutError(Exception):
     """Same class name as openai.APITimeoutError."""
 
 
+def recording_client(primary, fallback=None):
+    """Client whose waits are recorded instead of slept."""
+    sleeps = []
+    return OpenAIChat(primary, fallback, sleep=sleeps.append), sleeps
+
+
 @pytest.mark.parametrize("error,reason", [
-    (Http503("model overloaded"), "gemini server error (HTTP 503)"),
-    (APITimeoutError("Request timed out."), "gemini timeout"),
-    (ConnectionError("reset"), "gemini connection error"),
-    (Http429(), "gemini rate limit (HTTP 429)"),
+    (Http503("model overloaded"), "gemini server error (HTTP 503), after 1 retry"),
+    (APITimeoutError("Request timed out."), "gemini timeout, after 1 retry"),
+    (ConnectionError("reset"), "gemini connection error, after 1 retry"),
 ])
-def test_fallback_on_5xx_timeout_and_429(error, reason):
-    g, q = _Seq([error]), _Seq([_raw("from groq")])
-    client = client_with(gemini(g), groq(q))
+def test_5xx_or_timeout_retries_gemini_once_then_uses_groq(error, reason):
+    g, q = _Seq([error, error]), _Seq([_raw("from groq")])
+    client, sleeps = recording_client(gemini(g), groq(q))
     client.start_turn()
     assert client.complete(HI, tools=[]).model == DEFAULT_GROQ_MODEL
+    assert g.models == [DEFAULT_GEMINI_MODEL] * 2 and sleeps == [SERVER_RETRY_DELAY_S] == [2.0]
     assert client.switch_reason == reason
 
 
+def test_5xx_then_success_stays_on_gemini():
+    g, q = _Seq([Http503("overloaded"), _raw("second try")]), _Seq([])
+    client, sleeps = recording_client(gemini(g), groq(q))
+    client.start_turn()
+    resp = client.complete(HI, tools=[])
+    assert resp.model == DEFAULT_GEMINI_MODEL and resp.content == "second try"
+    assert sleeps == [2.0] and q.calls == [] and client.switch_reason is None
+
+
+def test_429_uses_groq_immediately_without_retrying_gemini():
+    g, q = _Seq([Http429(retry_after="40")]), _Seq([_raw("from groq")])
+    client, sleeps = recording_client(gemini(g), groq(q))
+    client.start_turn()
+    assert client.complete(HI, tools=[]).model == DEFAULT_GROQ_MODEL
+    assert g.models == [DEFAULT_GEMINI_MODEL] and sleeps == []
+    assert client.switch_reason == "gemini rate limit (HTTP 429)"
+
+
 def test_one_switch_per_turn_then_primary_again_next_turn():
-    g, q = _Seq([Http503("overloaded"), _raw("gemini again")]), _Seq([_raw("1"), _raw("2")])
+    g = _Seq([Http429(), _raw("gemini again")])
+    q = _Seq([_raw("1"), _raw("2")])
     client = client_with(gemini(g), groq(q))
     client.start_turn()
-    client.complete(HI, tools=[])                         # primary fails -> fallback
+    client.complete(HI, tools=[])                         # primary rate-limited -> fallback
     client.complete(HI, tools=[])                         # same turn: stays on the fallback, no new primary try
     assert g.models == [DEFAULT_GEMINI_MODEL] and q.models == [DEFAULT_GROQ_MODEL] * 2
     client.start_turn()                                   # next turn starts on the primary
     assert client.complete(HI, tools=[]).model == DEFAULT_GEMINI_MODEL and client.switch_reason is None
 
 
-def test_bad_request_does_not_switch():
-    client = client_with(gemini(_Seq([Http400("invalid argument")])), groq(_Seq([])))
+def test_bad_request_does_not_switch_or_retry():
+    g = _Seq([Http400("invalid argument")])
+    client, sleeps = recording_client(gemini(g), groq(_Seq([])))
     with pytest.raises(Http400):
         client.complete(HI, tools=[])
-    assert client.switch_reason is None
+    assert client.switch_reason is None and len(g.calls) == 1 and sleeps == []
 
 
 def test_fallback_error_is_not_switched_back():
-    client = client_with(gemini(_Seq([Http503("down")])), groq(_Seq([Http503("down too")])))
+    client = client_with(gemini(_Seq([Http503("down")] * 2)), groq(_Seq([Http503("down too")] * 2)))
     with pytest.raises(Http503):
         client.complete(HI, tools=[])
 
 
+def test_gemini_only_has_no_failover():
+    g = _Seq([Http503("down"), Http503("still down")])
+    client, sleeps = recording_client(gemini(g))
+    with pytest.raises(Http503):
+        client.complete(HI, tools=[])
+    assert len(g.calls) == 2 and sleeps == [2.0]                 # one retry, then the error reaches the turn
+
+
 def test_agent_reports_the_fallback_reason(frames):
     from agent.agent import Agent
-    client = client_with(gemini(_Seq([Http503("overloaded")])), groq(_Seq([_raw("- answer")])))
+    client = client_with(gemini(_Seq([Http503("overloaded")] * 2)), groq(_Seq([_raw("- answer")])))
     result = Agent(client, frames).ask("hello")
-    assert result.models == [DEFAULT_GROQ_MODEL] and result.fallback_reason == "gemini server error (HTTP 503)"
+    assert result.models == [DEFAULT_GROQ_MODEL]
+    assert result.fallback_reason == "gemini server error (HTTP 503), after 1 retry"
     from ui.progress import done_line
     assert done_line(result, 3.2, DEFAULT_GEMINI_MODEL).endswith(
-        "· gpt-oss-120b (fallback: gemini server error (HTTP 503))")
+        "· gpt-oss-120b (failover: gemini server error (HTTP 503), after 1 retry)")
+    gemini_answer = type(result)("x", [], [], models=[DEFAULT_GEMINI_MODEL])
+    assert done_line(gemini_answer, 2.0, DEFAULT_GEMINI_MODEL).endswith("· gemini-3.5-flash-lite")
 
 
 def test_no_fallback_configured_keeps_primary():
@@ -332,9 +361,7 @@ def test_no_fallback_configured_keeps_primary():
 
 # ---------------------------------------------------------------- configuration from the environment
 
-ENV = ("GEMINI_API_KEY", "GEMINI_BASE_URL", "LLM_MODEL", "LLM_REASONING_EFFORT", "LLM_API_KEY", "LLM_BASE_URL",
-       "LLM_FALLBACK_MODEL", "LLM_FALLBACK_REASONING_EFFORT", "LLM_TPM_LIMIT", "LLM_RPM_LIMIT",
-       "LLM_FALLBACK_TPM_LIMIT")
+ENV = ("GEMINI_API_KEY", "GEMINI_MODEL", "GROQ_API_KEY", "GROQ_MODEL")
 
 
 @pytest.fixture
@@ -344,27 +371,46 @@ def env(monkeypatch):
     return monkeypatch
 
 
-def test_env_gemini_primary_groq_fallback(env):
+def test_env_both_keys_gemini_primary_groq_failover(env):
     env.setenv("GEMINI_API_KEY", "g-key")
-    env.setenv("LLM_API_KEY", "q-key")
-    env.setenv("LLM_MODEL", "gemini-3.5-flash-lite")
+    env.setenv("GROQ_API_KEY", "q-key")
     primary, fallback = providers_from_env()
     assert (primary.name, primary.model, primary.base_url, primary.effort) == \
-        ("gemini", "gemini-3.5-flash-lite", GEMINI_BASE_URL, "minimal")
+        ("gemini", DEFAULT_GEMINI_MODEL, GEMINI_BASE_URL, "minimal")
     assert primary.pacer.rpm_limit == 15 and primary.is_gemini
     assert (fallback.name, fallback.model, fallback.base_url, fallback.effort) == \
-        ("groq", "openai/gpt-oss-120b", GROQ_BASE_URL, "low")
+        ("groq", DEFAULT_GROQ_MODEL, GROQ_BASE_URL, "low")
     assert not fallback.is_gemini
 
 
-def test_env_without_gemini_key_uses_groq_only(env):
-    env.setenv("LLM_API_KEY", "q-key")
-    primary, fallback = providers_from_env()
-    assert primary.model == DEFAULT_GROQ_MODEL and fallback is None
-
-
-def test_env_leftover_groq_model_name_is_not_sent_to_gemini(env):
+def test_env_model_names_are_configurable(env):
     env.setenv("GEMINI_API_KEY", "g-key")
-    env.setenv("LLM_MODEL", "openai/gpt-oss-120b")
+    env.setenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+    env.setenv("GROQ_API_KEY", "q-key")
+    env.setenv("GROQ_MODEL", "qwen/qwen3.8-27b")
     primary, fallback = providers_from_env()
-    assert primary.model == DEFAULT_GEMINI_MODEL and fallback is None
+    assert primary.model == "gemini-3.1-flash-lite" and fallback.model == "qwen/qwen3.8-27b"
+
+
+def test_env_gemini_only_mode_has_no_failover(env):
+    env.setenv("GEMINI_API_KEY", "g-key")
+    primary, fallback = providers_from_env()
+    assert primary.name == "gemini" and fallback is None
+    client = OpenAIChat.from_env()
+    assert client.fallback_model is None
+    from agent.speech import voice_available
+    assert not voice_available()
+
+
+def test_env_groq_only_mode_runs_on_groq(env):
+    env.setenv("GROQ_API_KEY", "q-key")
+    primary, fallback = providers_from_env()
+    assert (primary.name, primary.model) == ("groq", DEFAULT_GROQ_MODEL) and fallback is None
+    from agent.speech import voice_available
+    assert voice_available()
+
+
+def test_env_no_key(env):
+    assert providers_from_env() == (None, None)
+    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
+        OpenAIChat.from_env()

@@ -53,7 +53,7 @@ def test_invented_rerank_triggers_retry_with_required_tool_call(frames):
         call("rank_airports", {"region": "new england", "top_n": 10}, "t1"),   # turn 1: correct tool call
         text("AAA leads New England."),
         text(INVENTED),                                                         # turn 2, draft 1: no tool, invented
-        call("rank_airports", {"region": "new england", "top_n": 10, "weights": {"growth": 0.4}}, "t2"),
+        call("rank_airports", {"region": "new england", "top_n": 10, "preset": "growth-led"}, "t2"),
         text("With growth weighted higher, CCC ranks first in New England."),
     ])
     agent = Agent(fake, frames)
@@ -66,12 +66,12 @@ def test_invented_rerank_triggers_retry_with_required_tool_call(frames):
     # retry forced a tool call
     assert fake.tool_choices[2] == "auto" and fake.tool_choices[3] == "required"
     assert "rejected by an automatic check" in fake.seen[3][-1]["content"]
-    # final result: grounded, tool called with the same region and a higher growth weight
+    # final result: grounded, tool called with the same region and the growth-led preset
     assert result.retried and result.grounding_issues == []
     assert [r.name for r in result.tool_calls] == ["rank_airports"]
-    assert result.tool_calls[0].args["region"] == "new england" and result.tool_calls[0].args["weights"]["growth"] == 0.4
+    assert result.tool_calls[0].args["region"] == "new england" and result.tool_calls[0].args["preset"] == "growth-led"
     assert result.explanation.startswith("With growth weighted higher")
-    assert result.text.startswith("**Answer** - Top ") and "growth-weighted" in result.headline
+    assert result.text.startswith("**Answer** - Top ") and "preset growth-led" in result.headline
     # the invented draft never enters the conversation history
     assert agent.turns[0].answer.endswith("AAA leads New England.") and agent.turns[1].answer == result.text
     assert all(INVENTED not in json.dumps(m) for m in fake.seen[-1])

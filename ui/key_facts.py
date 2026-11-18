@@ -6,7 +6,7 @@ Labels are human-readable and every value carries its unit.
 
 import json
 
-from agent.tools import ToolCallRecord, contribution_differences
+from agent.tools import ToolCallRecord, contribution_differences, weights_label
 
 LABELS = {
     "lf_avg": "Average load factor", "lf_peak": "Peak-month load factor", "growth_yoy": "Passenger growth (YoY)",
@@ -58,7 +58,7 @@ def _gap_line(target: str, entry: dict) -> str:
 def facts_rank(record: ToolCallRecord) -> list[str]:
     ranking = record.envelope["data"]["ranking"]
     stab = record.envelope["data"]["stability"]
-    out = []
+    out = [f"Weights: {weights_label(ranking['weights'])}"]
     for r in ranking["ranking"][:3]:
         raw = {c["component"]: c["raw_value"] for c in r["components"]}
         out.append(f"#{r['rank']} {r['airport']} ({r['state']}, {r['hub']}): investment score "

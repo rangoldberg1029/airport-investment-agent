@@ -52,8 +52,8 @@ def rank_headline(record: ToolCallRecord) -> str:
     else:
         scope = "US candidates"
     items = "; ".join(f"{r[0]}. {r[1]} {r[2]} ({r[5]})" for r in rows)
-    text = (f"Top {len(rows)} {scope} for terminal expansion (investment score 0-100, "
-            f"{weights_label(v['weights'])}, {PERIOD}): {items}.")
+    text = (f"Top {len(rows)} {scope} for terminal expansion (investment score 0-100, {PERIOD}): {items}. "
+            f"Weights: {weights_label(v['weights'])}.")
     if len(v["rows"]) > TOP_N:
         text += (f" The top {TOP_N} is the same under all weight presets." if v["stability_same_set"]
                  else f" The top {TOP_N} changes with the weight presets.")

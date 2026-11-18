@@ -7,12 +7,12 @@ the exact tool call that answers it, so a click runs the tool directly (fast pat
 from dataclasses import dataclass, field
 
 from agent.tools import ToolCallRecord
-from scoring.config import DEFAULT_LONG_HAUL_MI, INVESTMENT_WEIGHTS, LONG_HAUL_THRESHOLDS_MI
+from scoring.config import DEFAULT_LONG_HAUL_MI, LONG_HAUL_THRESHOLDS_MI
 
 # Large hubs used to suggest "What about X?" (first one that is not the airport just shown).
 PEER_HUBS = ["SFO", "BOS", "LAX", "JFK", "ORD", "DEN", "ATL", "SEA"]
 MAX_SUGGESTIONS = 3
-GROWTH_HIGHER = 0.5       # partial override; merged with the defaults and renormalised (growth -> 40%)
+GROWTH_PRESET = "growth-led"     # "Rank them again with growth weighted higher" -> named preset (deterministic)
 
 
 @dataclass(frozen=True)
@@ -41,9 +41,9 @@ def _compare(a: str, b: str) -> Suggestion:
 def from_rank(record: ToolCallRecord) -> list[Suggestion]:
     ranking = record.envelope["data"]["ranking"]
     scope = {k: v for k, v in record.args.items() if k in ("region", "states", "airports")}
-    if ranking["weights"].get("growth", 0) <= INVESTMENT_WEIGHTS["growth"]:
+    if ranking.get("preset") != GROWTH_PRESET:
         out = [Suggestion("Rank them again with growth weighted higher", "rank_airports",
-                          {**scope, "weights": {"growth": GROWTH_HIGHER}})]
+                          {**scope, "preset": GROWTH_PRESET})]
     else:
         out = [Suggestion("Rank them again with default weights", "rank_airports", scope)]
     if ranking["ranking"]:

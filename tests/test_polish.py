@@ -24,18 +24,23 @@ def view(record) -> dict:
 # ---------------------------------------------------------------- 6. ranking headline + names
 
 def test_rank_headline_in_exact_tool_order_with_official_names(frames):
-    record = execute_tool("rank_airports", {"states": ["MA", "CT"], "weights": {"growth": 0.6}}, frames)
+    record = execute_tool("rank_airports", {"states": ["MA", "CT"], "preset": "growth-led"}, frames)
     d = view(record)
     assert list(d)[0] == "headline"
     rows = record.envelope["data"]["ranking"]["ranking"]
     expected = "; ".join(f"{r['rank']}. {r['airport']} {r['airport']} Intl {r['investment_score']}" for r in rows)
-    assert d["headline"] == f"Ranking (growth-weighted): {expected}"
+    assert d["headline"] == ("Ranking with preset growth-led (demand pressure 25%, growth 45%, congestion 15%, "
+                             f"scale 15%): {expected}")
+    assert d["preset"] == "growth-led"
     assert [row[2] for row in d["rows"]] == [f"{r['airport']} Intl" for r in rows]      # name column
 
 
-def test_rank_headline_default_weights_label(frames):
+def test_rank_headline_default_and_custom_weights_labels(frames):
     d = view(execute_tool("rank_airports", {"states": ["MA", "CT"]}, frames))
-    assert d["headline"].startswith("Ranking (default weights): 1. ")
+    assert d["headline"].startswith("Ranking with preset balanced (default) (demand pressure 35%, growth 25%, "
+                                    "congestion 25%, scale 15%): 1. ")
+    custom = view(execute_tool("rank_airports", {"states": ["MA", "CT"], "weights": {"growth": 0.6}}, frames))
+    assert custom["headline"].startswith("Ranking with custom weights (") and custom["preset"] == "custom"
 
 
 @pytest.mark.parametrize("name,args,path", [
@@ -59,7 +64,7 @@ def test_followups_per_tool(frames):
     top = rank.envelope["data"]["ranking"]["ranking"][0]["airport"]
     assert questions([rank]) == ["Rank them again with growth weighted higher", f"Show the profile of {top}",
                                  f"What is the unmet demand at {top}?"]
-    regrown = execute_tool("rank_airports", {"states": ["MA"], "weights": {"growth": 0.6}}, frames)
+    regrown = execute_tool("rank_airports", {"states": ["MA"], "preset": "growth-led"}, frames)
     assert questions([regrown])[0] == "Rank them again with default weights"
 
     compare = execute_tool("compare_congestion", {"airports": ["AAA", "BBB"]}, frames)
@@ -74,13 +79,14 @@ def test_followups_per_tool(frames):
 def test_followups_carry_the_tool_call_that_answers_them(frames):
     rank = execute_tool("rank_airports", {"region": "new england", "top_n": 5}, frames)
     again, profile, unmet = suggestions([rank])
-    assert (again.tool, again.args) == ("rank_airports", {"region": "new england", "weights": {"growth": 0.5}})
+    assert (again.tool, again.args) == ("rank_airports", {"region": "new england", "preset": "growth-led"})
     top = rank.envelope["data"]["ranking"]["ranking"][0]["airport"]
     assert (profile.tool, profile.args) == ("get_airport_profile", {"airport": top})
     assert (unmet.tool, unmet.args) == ("unmet_demand", {"airport": top})
-    # re-ranking with these arguments really raises the growth weight above the default
+    # re-ranking with these arguments uses the growth-led preset weights
     regrown = execute_tool(again.tool, again.args, frames)
-    assert regrown.envelope["data"]["ranking"]["weights"]["growth"] > 0.25
+    assert regrown.envelope["data"]["ranking"]["weights"]["growth"] == 0.45
+    assert regrown.envelope["data"]["ranking"]["preset"] == "growth-led"
     assert suggestions([regrown])[0].args == {"region": "new england"}          # back to default weights
 
     compare = execute_tool("compare_congestion", {"airports": ["AAA", "BBB"]}, frames)
@@ -105,11 +111,15 @@ def test_readable_period():
     assert readable_period("real time") == "Real time"
 
 
-def test_model_info_shows_fallback():
+def test_model_info_shows_failover_per_mode():
     from tests.test_llm import _Seq, client_with, gemini, groq
-    info = setup.model_info(client_with(gemini(_Seq([])), groq(_Seq([]))))
-    assert info.startswith("gemini-3.5-flash-lite · generativelanguage.googleapis.com · reasoning: minimal")
-    assert info.endswith("**Fallback:** openai/gpt-oss-120b · api.groq.com")
+    both = setup.model_info(client_with(gemini(_Seq([])), groq(_Seq([]))))
+    assert both.startswith("gemini-3.5-flash-lite · generativelanguage.googleapis.com · reasoning: minimal")
+    assert both.endswith("**Failover:** openai/gpt-oss-120b · api.groq.com")
+    assert setup.model_info(client_with(gemini(_Seq([])))).endswith("**Failover:** off (set GROQ_API_KEY)")
+    groq_only = setup.model_info(client_with(groq(_Seq([]))))
+    assert groq_only.startswith("openai/gpt-oss-120b · api.groq.com · reasoning: low")
+    assert "Groq only" in groq_only
 
 
 # ---------------------------------------------------------------- 7. daily quota

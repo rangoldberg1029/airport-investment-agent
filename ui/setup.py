@@ -11,13 +11,12 @@ from dotenv import load_dotenv
 from data.db import DB_PATH
 from data.repository import Frames, load_frames
 
-SECRET_KEYS = ("GEMINI_API_KEY", "GEMINI_BASE_URL", "LLM_MODEL", "LLM_REASONING_EFFORT",
-               "LLM_API_KEY", "LLM_BASE_URL", "LLM_FALLBACK_MODEL", "LLM_FALLBACK_REASONING_EFFORT")
+SECRET_KEYS = ("GEMINI_API_KEY", "GEMINI_MODEL", "GROQ_API_KEY", "GROQ_MODEL")
 
 
 def get_api_key() -> str | None:
-    """An LLM key (GEMINI_API_KEY primary, LLM_API_KEY = Groq fallback) from .env / environment, else from
-    Streamlit secrets (Community Cloud)."""
+    """The LLM key in use (GEMINI_API_KEY, else GROQ_API_KEY for Groq-only mode) from .env / environment, else
+    from Streamlit secrets (Community Cloud)."""
     load_dotenv(".env")
     try:
         for key in SECRET_KEYS:
@@ -25,7 +24,14 @@ def get_api_key() -> str | None:
                 os.environ[key] = str(st.secrets[key])
     except Exception:          # no secrets.toml: st.secrets raises
         pass
-    return os.getenv("GEMINI_API_KEY") or os.getenv("LLM_API_KEY") or None
+    return os.getenv("GEMINI_API_KEY") or os.getenv("GROQ_API_KEY") or None
+
+
+def voice_available() -> bool:
+    """Voice input needs GROQ_API_KEY (Whisper on Groq)."""
+    from agent.speech import voice_available as available
+
+    return available()
 
 
 @st.cache_resource(show_spinner=False)
@@ -62,7 +68,7 @@ def get_answer_cache():
 
 
 def make_client():
-    """The real LLM client: Gemini primary + Groq fallback (see agent/llm.py for the environment variables)."""
+    """The real LLM client: Gemini, with failover to Groq when GROQ_API_KEY is set (see agent/llm.py)."""
     from agent.llm import OpenAIChat
 
     return OpenAIChat.from_env()
@@ -73,11 +79,17 @@ def _host(provider) -> str:
 
 
 def model_info(client) -> str:
-    """'gemini-3.5-flash-lite · generativelanguage.googleapis.com · reasoning: minimal' + fallback line."""
+    """Sidebar text: the model in use and the failover model, e.g.
+    'gemini-3.5-flash-lite · generativelanguage.googleapis.com · reasoning: minimal' +
+    'Failover: openai/gpt-oss-120b · api.groq.com' (or 'off - set GROQ_API_KEY')."""
     model = getattr(client, "model", "unknown model")
     primary = getattr(client, "primary", None)
     effort = getattr(client, "reasoning_effort", None)
     fallback = getattr(client, "fallback_model", None)
     fb = getattr(client, "fallback", None)
-    return (f"{model}" + (f" · {_host(primary)}" if primary else "") + (f" · reasoning: {effort}" if effort else "")
-            + (f"  \n**Fallback:** {fallback}" + (f" · {_host(fb)}" if fb else "") if fallback else ""))
+    text = f"{model}" + (f" · {_host(primary)}" if primary else "") + (f" · reasoning: {effort}" if effort else "")
+    if fallback:
+        return text + f"  \n**Failover:** {fallback}" + (f" · {_host(fb)}" if fb else "")
+    if getattr(primary, "name", "") == "gemini":
+        return text + "  \n**Failover:** off (set GROQ_API_KEY)"
+    return text + "  \n**Failover:** none (Groq only; set GEMINI_API_KEY for the primary model)"

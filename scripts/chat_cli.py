@@ -1,6 +1,6 @@
 """Terminal chat with the agent, for quick manual testing.
 
-Run:  python scripts/chat_cli.py      (needs .env with LLM_API_KEY; commands: /reset, /quit)
+Run:  python scripts/chat_cli.py      (needs .env with GEMINI_API_KEY; commands: /reset, /quit)
 """
 
 import sys

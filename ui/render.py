@@ -1,17 +1,19 @@
 """Rendering: the 'About this agent' text (pure) and one assistant message (answer, key facts, evidence)."""
 
 import json
+import os
 import re
 from datetime import date
 
 import streamlit as st
 
+from agent.llm import DEFAULT_GEMINI_MODEL, DEFAULT_GROQ_MODEL
 from agent.tools import ToolCallRecord, _source_inventory
 from data.repository import Frames
 from scoring.common import window_label
 from scoring.config import (
-    DEFAULT_LONG_HAUL_MI, LOAD_FACTOR_SENSITIVITY, LONG_HAUL_THRESHOLDS_MI, MIN_COMMERCIAL_RUNWAY_FT,
-    PRIOR_WINDOW, RANKING_UNIVERSE_HUBS, TARGET_LOAD_FACTOR, WINDOW,
+    DEFAULT_LONG_HAUL_MI, DEFAULT_PRESET, LOAD_FACTOR_SENSITIVITY, LONG_HAUL_THRESHOLDS_MI,
+    MIN_COMMERCIAL_RUNWAY_FT, PRIOR_WINDOW, RANKING_UNIVERSE_HUBS, TARGET_LOAD_FACTOR, WEIGHT_PRESETS, WINDOW,
 )
 from ui import evidence
 from ui.followups import suggestions
@@ -49,10 +51,34 @@ def readable_period(span: str) -> str:
     return cap(span or "")
 
 
+def setup_status() -> str:
+    """Which of the two keys are configured, in one sentence (empty when neither is: the setup card shows)."""
+    gemini_key, groq_key = bool(os.getenv("GEMINI_API_KEY")), bool(os.getenv("GROQ_API_KEY"))
+    if gemini_key and groq_key:
+        return " Voice input and failover are **on**."
+    if gemini_key:
+        return " Voice input and failover are **off** (no `GROQ_API_KEY`)."
+    if groq_key:
+        return " Running on **Groq only** (no `GEMINI_API_KEY`): voice input on, no failover."
+    return ""
+
+
+def models_markdown() -> str:
+    """The language-model setup, from agent/llm.py constants and the configured environment."""
+    gemini = os.getenv("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL
+    groq = os.getenv("GROQ_MODEL") or DEFAULT_GROQ_MODEL
+    status = setup_status()
+    return (f"**Language models.** Google Gemini `{gemini}` (free tier, `GEMINI_API_KEY`). Optional Groq "
+            f"(free tier, `GROQ_API_KEY`) adds voice input (Whisper) and automatic failover to `{groq}`: "
+            f"immediately when Gemini is rate-limited, and after one retry when Gemini returns a server error or "
+            f"times out. The status line under each answer names the model that answered.{status}")
+
+
 def about_markdown(frames: Frames) -> str:
     """'About this agent' content, generated from config and the loaded data so it never goes stale."""
     sources = "\n".join(f"| {s['id']} | {s['name']} | {cap(s['access'])} | {readable_period(s['period'])} | "
                         f"{cap(', '.join(s['feeds']))} |" for s in _source_inventory(frames))
+    presets = ", ".join(f"{n} (default)" if n == DEFAULT_PRESET else n for n in WEIGHT_PRESETS)
     return f"""
 **What it does.** Ranks and explains US airports where terminal or capacity investment is most likely to pay off,
 based on passenger demand versus capacity: load factors, growth, delays, airspace (NAS) delays and runway use.
@@ -63,6 +89,8 @@ Out of scope: non-US airports, construction costs, financing and returns, fares,
 
 **Key assumptions** (all configurable in `scoring/config.py`)
 - Rankings compare FAA {'/'.join(RANKING_UNIVERSE_HUBS)} hubs nationally (percentiles, 0-100).
+- Investment-score weights come from named presets: {presets}. A request such as "weight growth higher" uses
+  a preset, so the same question always gives the same ranking; custom weights only when you give numbers.
 - Long-haul = segment distance >= {DEFAULT_LONG_HAUL_MI:,} statute miles (sensitivity at
   {', '.join(f'{t:,}' for t in LONG_HAUL_THRESHOLDS_MI)} mi).
 - Capacity gap target load factor {TARGET_LOAD_FACTOR:.2f} (sensitivity {', '.join(f'{x:.2f}' for x in LOAD_FACTOR_SENSITIVITY)}).
@@ -70,8 +98,12 @@ Out of scope: non-US airports, construction costs, financing and returns, fares,
 - Unmet demand is a proxy: true spilled demand is not observable in public data.
 
 **How AI is used.** The language model only (1) understands the question, (2) chooses a tool and its arguments and
-(3) explains the tool output. **Every number is computed by deterministic Python**, shown in *Key facts* and
-*Evidence* under each answer, and checked: numbers in the answer that cannot be traced to a tool output are flagged.
+(3) explains the tool output. **Every number is computed by deterministic Python.** The *Answer* line of each reply
+is built by code from the tool output; the model writes only the *Why / drivers* bullets, which are checked:
+numbers that cannot be traced to a tool output are flagged. *Key facts* and *Evidence* under each answer are
+computed, not AI-generated.
+
+{models_markdown()}
 
 **Data sources**
 

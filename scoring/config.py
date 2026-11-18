@@ -39,10 +39,16 @@ MIN_COMMERCIAL_RUNWAY_FT = 5000
 # congestion = congestion index, scale = passengers. All percentile-normalised vs the universe.
 INVESTMENT_WEIGHTS = {"demand_pressure": 0.35, "growth": 0.25, "congestion": 0.25, "scale": 0.15}
 
+# Named weight presets. A request like "weight growth higher" maps to a preset, so the same question always
+# gives the same ranking; custom weights are used only when the user gives explicit numbers.
+# All presets are also used to test rank stability.
+DEFAULT_PRESET = "balanced"
 WEIGHT_PRESETS = {
     "balanced": INVESTMENT_WEIGHTS,
     "demand-led": {"demand_pressure": 0.50, "growth": 0.20, "congestion": 0.15, "scale": 0.15},
     "congestion-led": {"demand_pressure": 0.25, "growth": 0.15, "congestion": 0.45, "scale": 0.15},
+    "growth-led": {"demand_pressure": 0.25, "growth": 0.45, "congestion": 0.15, "scale": 0.15},
+    "scale-led": {"demand_pressure": 0.25, "growth": 0.15, "congestion": 0.15, "scale": 0.45},
 }
 
 # Congestion index components. ops_per_runway is a rough proxy (see metrics.kpi_table).

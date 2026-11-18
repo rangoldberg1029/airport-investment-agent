@@ -16,14 +16,20 @@ def test_rank_headline_is_built_from_the_ranking(frames):
     rows = record.envelope["data"]["ranking"]["ranking"][:3]
     items = "; ".join(f"{r['rank']}. {r['airport']} {r['airport']} Intl ({r['investment_score']})" for r in rows)
     assert answer_headline([record]) == (
-        f"Top {len(rows)} candidates in MA/CT for terminal expansion (investment score 0-100, default weights, "
-        f"Sep 2025 - Aug 2026): {items}.")
+        f"Top {len(rows)} candidates in MA/CT for terminal expansion (investment score 0-100, "
+        f"Sep 2025 - Aug 2026): {items}. Weights: preset balanced (default) (demand pressure 35%, growth 25%, "
+        f"congestion 25%, scale 15%).")
 
 
-def test_rank_headline_names_custom_weights(frames):
-    record = execute_tool("rank_airports", {"region": "new england", "weights": {"growth": 0.5}}, frames)
-    assert answer_headline([record]).startswith("Top ") and "New England candidates" in answer_headline([record])
-    assert "growth-weighted" in answer_headline([record])
+def test_rank_headline_names_the_preset_and_its_weights(frames):
+    headline = answer_headline([execute_tool("rank_airports", {"region": "new england", "preset": "growth-led"},
+                                             frames)])
+    assert headline.startswith("Top ") and "New England candidates" in headline
+    assert ("Weights: preset growth-led (demand pressure 25%, growth 45%, congestion 15%, scale 15%)."
+            in headline)
+    custom = answer_headline([execute_tool("rank_airports", {"region": "new england", "weights": {"growth": 0.5}},
+                                           frames)])
+    assert "Weights: custom weights (" in custom
 
 
 @pytest.mark.parametrize("name,args,expected", [

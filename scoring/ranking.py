@@ -10,7 +10,7 @@ import pandas as pd
 from data.repository import Frames
 from scoring.common import envelope, pct, resolve_airport, resolve_region, rnd, window_label
 from scoring.config import (
-    CONGESTION_WEIGHTS, INVESTMENT_WEIGHTS, LOAD_FACTOR_SENSITIVITY, RANKING_UNIVERSE_HUBS,
+    CONGESTION_WEIGHTS, DEFAULT_PRESET, LOAD_FACTOR_SENSITIVITY, RANKING_UNIVERSE_HUBS,
     SOURCE_LABELS, TARGET_LOAD_FACTOR, UNMET_DEMAND_WEIGHTS, WEIGHT_PRESETS, WINDOW,
 )
 from scoring.metrics import (
@@ -53,6 +53,26 @@ def validate_weights(weights: dict | None, defaults: dict) -> tuple[dict, list[s
     merged = {k: v / total for k, v in merged.items()}
     return merged, [f"User-overridden weights (renormalised to sum 1): "
                     + ", ".join(f"{k} {v:.0%}" for k, v in merged.items())]
+
+
+def preset_of(weights: dict) -> str | None:
+    """Name of the preset these (normalised) weights equal, else None (custom weights)."""
+    for name, preset in WEIGHT_PRESETS.items():
+        if set(preset) == set(weights) and all(abs(weights[k] - preset[k]) < 1e-9 for k in preset):
+            return name
+    return None
+
+
+def investment_weights(preset: str | None = None, weights: dict | None = None) -> tuple[dict, list[str]]:
+    """Weights for the investment score: a named preset (default 'balanced'), optionally with explicit
+    user-given weights on top (merged and renormalised)."""
+    if preset is not None and preset not in WEIGHT_PRESETS:
+        raise ValueError(f"unknown preset '{preset}'; options: {', '.join(WEIGHT_PRESETS)}")
+    base = WEIGHT_PRESETS[preset or DEFAULT_PRESET]
+    if weights:
+        return validate_weights(weights, base)
+    notes = [f"Weight preset '{preset}': " + ", ".join(f"{k} {v:.0%}" for k, v in base.items())] if preset else []
+    return dict(base), notes
 
 
 def weighted_index(pcts: pd.DataFrame, weights: dict) -> tuple[pd.Series, pd.DataFrame, pd.Series]:
@@ -279,9 +299,10 @@ def _select(k: pd.DataFrame, region: str | None, states, airports) -> tuple[pd.I
 
 def investment_scores(frames: Frames, region: str | None = None, states: list[str] | None = None,
                       airports: list[str] | None = None, weights: dict | None = None,
-                      top_n: int | None = None) -> dict:
-    """Investment score 0-100 for a region / state list / airport list (default: all ranked airports)."""
-    w, w_assumptions = validate_weights(weights, INVESTMENT_WEIGHTS)
+                      top_n: int | None = None, preset: str | None = None) -> dict:
+    """Investment score 0-100 for a region / state list / airport list (default: all ranked airports).
+    Weights: a named preset (default 'balanced') and/or explicit user weights (see investment_weights)."""
+    w, w_assumptions = investment_weights(preset, weights)
     k = kpi_table(frames)
     raw, pcts, contrib, score = investment_table(frames, w)
     selected, sel_assumptions = _select(k, region, states, airports)
@@ -303,7 +324,7 @@ def investment_scores(frames: Frames, region: str | None = None, states: list[st
         for a in selected if a in k.index and not k.loc[a, "in_universe"] and k.loc[a, "passengers"] >= 50_000
     ]
     return envelope(
-        {"ranking": rows, "ranked_nationally": len(national), "weights": w,
+        {"ranking": rows, "ranked_nationally": len(national), "weights": w, "preset": preset_of(w),
          "outside_ranking_universe": sorted(outside, key=lambda x: -x["passengers"]),
          "units": "demand_pressure = load factor; growth in %; congestion = congestion index 0-100; scale = passengers"},
         ALL_SOURCES, PERIOD,
@@ -335,6 +356,7 @@ def rank_stability(frames: Frames, region: str | None = None, states: list[str] 
         {"top_n": top_n, "rankings": rankings, "presets": WEIGHT_PRESETS,
          "same_top_n_set": len(sets) == 1, "same_top_n_order": len(orders) == 1},
         ALL_SOURCES, PERIOD,
-        assumptions + ["Weight presets: balanced (default), demand-led, congestion-led"],
+        assumptions + ["Weight presets: " + ", ".join(
+            f"{n} (default)" if n == DEFAULT_PRESET else n for n in WEIGHT_PRESETS)],
         ["Stability across presets increases confidence but does not validate the weights themselves"],
     )

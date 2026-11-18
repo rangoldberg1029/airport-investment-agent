@@ -29,11 +29,11 @@ def tool_label(name: str, args: str | dict) -> str:
 
 
 def done_line(result, seconds: float, primary: str) -> str:
-    """'Done · 1 tool call · 2,682 tokens · 3s · gemini-3.5-flash-lite + gpt-oss-120b (fallback: gemini server
-    error (HTTP 503))': shown once, in the status label. `result` is an agent TurnResult."""
+    """Status label after a turn; names the model(s) that answered, e.g. 'Done · 1 tool call · 2,682 tokens · 3s ·
+    gpt-oss-120b (failover: gemini server error (HTTP 503), after 1 retry)'. `result` is an agent TurnResult."""
     n = len(result.tool_calls)
     why = f": {result.fallback_reason}" if result.fallback_reason else ""
-    names = [m.split("/")[-1] + (f" (fallback{why})" if m != primary else "") for m in result.models]
+    names = [m.split("/")[-1] + (f" (failover{why})" if m != primary else "") for m in result.models]
     return (f"Done · {n} tool call{'s' if n != 1 else ''} · {result.total_tokens:,} tokens · {seconds:.0f}s"
             + (f" · {' + '.join(names)}" if names else ""))
 

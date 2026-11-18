@@ -37,8 +37,9 @@ class ScriptedLLM:
 
 @pytest.fixture
 def app(monkeypatch, frames):
-    def configure(api_key="test-key", answer="AAA ranks first.", client=None):
+    def configure(api_key="test-key", answer="AAA ranks first.", client=None, voice=True):
         monkeypatch.setattr(setup, "get_api_key", lambda: api_key)
+        monkeypatch.setattr(setup, "voice_available", lambda: voice)
         monkeypatch.setattr(setup, "get_frames", lambda: frames)
         monkeypatch.setattr(setup, "data_info", lambda: {"sources": [], "built": "2026-11-18"})
         monkeypatch.setattr(setup, "make_client", lambda: client or ScriptedLLM(answer))
@@ -55,11 +56,34 @@ def markdown_text(at) -> str:
     return "\n".join(m.value for m in at.markdown)
 
 
-def test_missing_key_shows_setup_message(app):
-    at = app(api_key=None)
+def test_neither_key_shows_setup_card_with_the_key_names(app):
+    at = app(api_key=None, voice=False)
     assert not at.exception
-    assert any("Setup needed" in i.value for i in at.info)
+    card = next(i.value for i in at.info if "Setup needed" in i.value)
+    assert "`GEMINI_API_KEY=...` (required)" in card and "`GROQ_API_KEY=...` (optional)" in card
+    assert ".streamlit/secrets.toml.example" in card
     assert at.chat_input[0].disabled
+    assert all(b.disabled for b in at.button if b.key and b.key.startswith("card_"))
+
+
+def captions(at) -> str:
+    return " ".join(c.value for c in at.sidebar.caption)
+
+
+def test_gemini_only_mode_works_without_voice(app):
+    from tests.test_llm import _Seq, client_with, gemini
+    at = app(voice=False)
+    assert "Voice input requires GROQ_API_KEY" in captions(at)
+    assert not at.sidebar.get("audio_input")                                    # no recorder
+    at.button(key="card_0").click().run()                                       # answering still works
+    assert not at.exception and "AAA ranks first." in markdown_text(at)
+    assert "**Failover:** off (set GROQ_API_KEY)" in setup.model_info(client_with(gemini(_Seq([]))))
+
+
+def test_groq_key_enables_voice(app):
+    at = app(voice=True)
+    assert "Voice input requires GROQ_API_KEY" not in captions(at)
+    assert at.sidebar.get("audio_input")                                        # the recorder is shown
 
 
 def test_examples_shown_in_exactly_one_place(app):
