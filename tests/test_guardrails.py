@@ -25,6 +25,7 @@ def test_ordinals_and_decimals_are_parsed_whole():
 
 def test_codes_and_identifiers_are_not_numbers():
     assert values("runway 07L/25R, BTS T-100, CY2025, r495-tyji, Q1") == []
+    assert values("BTS T‑100 and T–100") == []        # non-breaking hyphen / en dash used by LLMs
 
 
 def test_matches_with_rounding_and_percent_conversion():

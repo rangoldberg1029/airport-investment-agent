@@ -13,7 +13,7 @@ from scoring.config import (
 )
 
 NUMBER_RE = re.compile(
-    r"(?<![\w.\-/])"                                  # not part of a word, code or range like T-100, 07L/25R
+    r"(?<![\w.\-/‐‑‒–—])"   # not part of a word, code or range like T-100 (any hyphen)
     r"([+\-−]?)"                                 # sign (incl. unicode minus)
     r"(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?"           # 1,234,567 | 1234 | 12.5
     r"(?:st|nd|rd|th)?"                               # ordinals: 63.7th percentile

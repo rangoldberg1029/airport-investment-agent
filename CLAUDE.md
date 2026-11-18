@@ -129,6 +129,6 @@ All computed per airport over a trailing 12-month window (state the window in ev
 - [x] 3. ETL → DuckDB
 - [x] 4. Metrics + scoring + tests (the 4 example questions answered via Python only)
 - [x] 5. Agent loop + tools
-- [ ] 6. Streamlit chat UI (show tool calls + sources; voice = bonus)
+- [x] 6. Streamlit chat UI (show tool calls + sources; voice = bonus)
 - [ ] 7. DESIGN.md + README.md
 - [ ] 8. Publish public GitHub repo

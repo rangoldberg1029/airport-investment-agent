@@ -8,6 +8,7 @@ All tool records are kept in the Agent for the UI and for the number check.
 
 import json
 from dataclasses import dataclass, field
+from typing import Callable
 
 from agent.guardrails import untraceable_numbers
 from agent.llm import LLMClient, RateLimited
@@ -65,19 +66,24 @@ class Agent:
         self.turns = []
 
     # ---------------------------------------------------------------- loop
-    def ask(self, text: str) -> TurnResult:
+    def ask(self, text: str, on_event: Callable[..., None] | None = None) -> TurnResult:
+        """Answer one user message. `on_event(event, **details)` reports progress to a UI:
+        llm_call(round, after_tools), tool_start(name, args), tool_done(name, error)."""
+        emit = on_event or (lambda event, **kw: None)
         turn = Turn(user=text)
         tokens, calls = 0, 0
         try:
             answer = None
-            for _ in range(self.max_tool_rounds):
+            for round_no in range(self.max_tool_rounds):
+                emit("llm_call", round=round_no, after_tools=bool(turn.records))
                 resp = self.client.complete(self.messages(turn), TOOL_SCHEMAS)
                 tokens, calls = tokens + resp.total_tokens, calls + 1
                 if not resp.tool_calls:
                     answer = resp.content
                     break
-                self._run_tools(turn, resp)
+                self._run_tools(turn, resp, emit)
             if answer is None:                     # rounds exhausted: force a final answer
+                emit("llm_call", round=self.max_tool_rounds, after_tools=True)
                 resp = self.client.complete(self.messages(turn), TOOL_SCHEMAS, tool_choice="none")
                 tokens, calls, answer = tokens + resp.total_tokens, calls + 1, resp.content
         except RateLimited as exc:
@@ -94,14 +100,16 @@ class Agent:
         check = untraceable_numbers(turn.answer, everything, user_text=text)
         return TurnResult(turn.answer, turn.records, check, tokens, calls)
 
-    def _run_tools(self, turn: Turn, resp) -> None:
+    def _run_tools(self, turn: Turn, resp, emit: Callable[..., None]) -> None:
         turn.steps.append({
             "role": "assistant", "content": resp.content or "",
             "tool_calls": [{"id": c.id, "type": "function",
                             "function": {"name": c.name, "arguments": c.arguments}} for c in resp.tool_calls],
         })
         for call in resp.tool_calls:
+            emit("tool_start", name=call.name, args=call.arguments)
             record = execute_tool(call.name, call.arguments, self.frames, self.tool_overrides)
+            emit("tool_done", name=call.name, error=record.error)
             turn.records.append(record)
             turn.steps.append({"role": "tool", "tool_call_id": call.id, "content": record.llm_view})
 

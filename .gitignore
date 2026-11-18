@@ -24,3 +24,6 @@ data/raw/*
 Thumbs.db
 .vscode/
 .idea/
+
+# Streamlit secrets (API keys when deployed)
+.streamlit/secrets.toml

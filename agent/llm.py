@@ -115,7 +115,8 @@ def estimate_tokens(messages: list[dict], tools: list[dict], max_output: int) ->
 class OpenAIChat:
     def __init__(self, api_key: str | None = None, base_url: str | None = None, model: str | None = None,
                  reasoning_effort: str | None = None, tpm_limit: int | None = None,
-                 max_output_tokens: int | None = None, temperature: float = 0.2):
+                 max_output_tokens: int | None = None, temperature: float = 0.2,
+                 sleep: Callable[[float], None] = time.sleep):
         from openai import OpenAI
 
         self.model = model or os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
@@ -124,11 +125,17 @@ class OpenAIChat:
                              max_retries=0)   # we handle 429 ourselves
         effort = reasoning_effort or os.getenv("LLM_REASONING_EFFORT", "low")
         self.reasoning_effort = effort if "gpt-oss" in self.model else None
-        self.pacer = TpmPacer(limit=tpm_limit or int(os.getenv("LLM_TPM_LIMIT", "8000")))
+        self.sleep = sleep
+        self.pacer = TpmPacer(limit=tpm_limit or int(os.getenv("LLM_TPM_LIMIT", "8000")), sleep=sleep)
         # Cap per LLM call. For gpt-oss it includes hidden reasoning tokens: answers in the eval were
         # <= ~600 tokens, reasoning at effort "low" ~100-300, so 1,000 leaves headroom.
         self.max_output_tokens = max_output_tokens or int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "1000"))
         self.temperature = temperature
+
+    def set_sleep(self, sleep: Callable[[float], None]) -> None:
+        """Replace how waits happen (pacing and 429 retries), e.g. a UI countdown."""
+        self.sleep = sleep
+        self.pacer.sleep = sleep
 
     def _update_limit(self, headers) -> None:
         """Pace to the provider's real per-model limit (Groq: x-ratelimit-limit-tokens), unless set explicitly."""
@@ -145,7 +152,7 @@ class OpenAIChat:
                       temperature=self.temperature, max_completion_tokens=self.max_output_tokens)
         if self.reasoning_effort:
             kwargs["reasoning_effort"] = self.reasoning_effort
-        raw = with_retry(lambda: self.client.chat.completions.with_raw_response.create(**kwargs))
+        raw = with_retry(lambda: self.client.chat.completions.with_raw_response.create(**kwargs), sleep=self.sleep)
         self._update_limit(raw.headers)
         resp = raw.parse()
         usage = resp.usage
