@@ -14,7 +14,8 @@ from ui import setup
 from ui.cache import cache_key
 from ui.progress import StatusReporter, done_line
 from ui.render import (
-    EXAMPLE_CALLS, EXAMPLES, AnswerFrame, LiveAnswer, about_markdown, render_assistant, render_followups,
+    DISCLAIMER, EXAMPLE_CALLS, EXAMPLES, AnswerFrame, LiveAnswer, about_markdown, render_assistant,
+    render_followups,
 )
 
 st.set_page_config(page_title="Airport Investment Intelligence", page_icon="✈️", layout="wide")
@@ -113,6 +114,7 @@ with st.sidebar:
     info = setup.data_info()
     st.caption(f"**Data period:** {window_label(WINDOW)} (trailing 12 months)"
                + (f"  \n**Data built:** {info['built']}" if info.get("built") else ""))
+    st.caption(DISCLAIMER)
 
 # ---------------------------------------------------------------- setup notice
 if not api_key:

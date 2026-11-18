@@ -21,6 +21,8 @@ from ui import evidence
 from ui.followups import suggestions
 from ui.key_facts import key_facts
 
+DISCLAIMER = "Demo using public data. Not investment advice."
+
 EXAMPLES = [
     "Which airports in New England are strong candidates for terminal expansion?",
     "Compare LA (LAX) and Santa Ana (SNA) airport congestion levels.",
@@ -106,6 +108,8 @@ numbers that cannot be traced to a tool output are flagged. *Key facts* and *Evi
 computed, not AI-generated.
 
 {models_markdown()}
+
+*{DISCLAIMER}*
 
 **Data sources**
 

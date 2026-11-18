@@ -134,6 +134,7 @@ def test_about_text_is_generated_from_config(frames):
     assert "Sep 2024 – Aug 2026" in text and "2024-09..2026-08" not in text        # readable periods
     assert "Every number is computed by deterministic Python" in text
     assert "growth-led" in text and "Google Gemini `gemini-3.5-flash-lite`" in text
+    assert "Demo using public data. Not investment advice." in text
 
 
 @pytest.mark.parametrize("keys,expected", [

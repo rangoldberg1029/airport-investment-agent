@@ -40,7 +40,7 @@ def get_frames() -> Frames:
     if not DB_PATH.exists():
         from data.etl import build
 
-        with st.spinner("Preparing data (first run, about 20 seconds)..."):
+        with st.spinner("Preparing data (first run, a few seconds)..."):
             build("offline")
     return load_frames()
 

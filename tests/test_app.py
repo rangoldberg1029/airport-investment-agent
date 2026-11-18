@@ -88,6 +88,11 @@ def test_groq_key_enables_voice(app):
     assert at.sidebar.get("audio_input")                                        # the recorder is shown
 
 
+def test_disclaimer_in_sidebar(app):
+    at = app()
+    assert any(c.value == "Demo using public data. Not investment advice." for c in at.sidebar.caption)
+
+
 def test_examples_shown_in_exactly_one_place(app):
     at = app()
     # empty state: main-area cards only, no sidebar list

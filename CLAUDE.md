@@ -136,8 +136,8 @@ All computed per airport over a trailing 12-month window (state the window in ev
 - [x] 5. Agent loop + tools (incl. guardrails: number check, grounding check, retry)
 - [x] 6. Streamlit chat UI (show tool calls + sources; voice = bonus); polish done
       (empty state, follow-ups, ranking headlines, quota handling, examples in one place)
-- [ ] 7. DESIGN.md + README.md  ← next
-- [ ] 8. Publish (repo is already public on GitHub, origin main; optional Streamlit Community Cloud deploy)
+- [x] 7. DESIGN.md + README.md (+ GitHub Actions CI: offline DB build + pytest on Python 3.12)
+- [ ] 8. Publish (repo is already public on GitHub, origin main; Streamlit Community Cloud deploy)  ← next
 
 ## Decisions log
 One line of reasoning per decision. Values live in `scoring/config.py`; change them there, not here.
@@ -148,7 +148,7 @@ One line of reasoning per decision. Values live in `scoring/config.py`; change t
 - **Keep all downloaded months in DuckDB; windows are applied in scoring.** Lets the window move without a re-ETL.
 - **Drop the carrier dimension in the processed tables.** Not needed for any KPI and keeps the parquet caches small.
 - **Processed parquet caches committed in `data/processed`; raw downloads never committed.** The app builds
-  offline in ~20 s with no downloads; caches are refreshed only with `python -m data.etl --from-raw`.
+  offline in a few seconds with no downloads; caches are refreshed only with `python -m data.etl --from-raw`.
 - **Passenger service = CLASS in (F, L) and AIRCRAFT_CONFIG != 2.** Scheduled + non-scheduled passenger
   service, excluding freighter-configured aircraft (scope: passenger airports).
 - **Completion gap only on rows with departures scheduled > 0 (US carriers).** Foreign carriers report
