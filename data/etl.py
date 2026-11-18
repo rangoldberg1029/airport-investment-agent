@@ -63,6 +63,7 @@ def update_manifest(processed_dir: Path, runs: list[Provenance], files: dict[str
         "  aggregated to origin × dest × month. `dep_*_us` columns only count rows with scheduled departures > 0.",
         "- `delay_cause.parquet`: reporting carriers summed per arrival airport × month.",
         "- `socrata_airport_months.parquet`: all carriers incl. all-cargo flights (cross-check only).",
+        "- `runways_us.parquet`: open runways at US commercial airports; scoring applies the minimum length.",
     ]
     (processed_dir / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -75,7 +76,8 @@ def build(mode: str = "live", processed_dir: Path = PROCESSED_DIR,
     soc, p_soc = socrata.load(mode, processed_dir)
     enpl, p_faa = faa.load(mode, processed_dir)
     oa, p_oa = ourairports.load(mode, processed_dir)
-    runs = [p_t100, p_delay, p_soc, p_faa, p_oa]
+    rw, p_rw = ourairports.load_runways(mode, processed_dir)
+    runs = [p_t100, p_delay, p_soc, p_faa, p_oa, p_rw]
 
     tables = {
         "t100_routes": routes,
@@ -83,6 +85,7 @@ def build(mode: str = "live", processed_dir: Path = PROCESSED_DIR,
         "socrata_airport_months": soc,
         "faa_enplanements": enpl,
         "airports": build_airports(oa, enpl),
+        "runways": rw,
     }
     empty = [name for name, df in tables.items() if df.empty]
     if empty:
@@ -97,7 +100,8 @@ def build(mode: str = "live", processed_dir: Path = PROCESSED_DIR,
     if mode == "from_raw":
         files = {t100.SOURCE: t100.CACHE_FILE, delay_cause.SOURCE: delay_cause.CACHE_FILE,
                  socrata.SOURCE: socrata.CACHE_FILE, faa.SOURCE: faa.CACHE_FILE,
-                 ourairports.SOURCE: ourairports.CACHE_FILE}
+                 ourairports.SOURCE: ourairports.CACHE_FILE,
+                 ourairports.RUNWAYS_SOURCE: ourairports.RUNWAYS_CACHE_FILE}
         update_manifest(processed_dir, runs, files)
 
     lines, flags = quality.report(tables)

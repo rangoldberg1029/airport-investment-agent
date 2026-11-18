@@ -14,7 +14,7 @@ from scoring.config import (
     SOURCE_LABELS, TARGET_LOAD_FACTOR, UNMET_DEMAND_WEIGHTS, WEIGHT_PRESETS, WINDOW,
 )
 from scoring.metrics import (
-    COMPLETION_CAVEAT, DELAY_CAVEAT, NAS_ASSUMPTION, OPS_ASSUMPTION, OPS_CAVEAT, PERIOD, hub_label, kpi_table, socrata_window,
+    COMPLETION_CAVEAT, DELAY_CAVEAT, NAS_ASSUMPTION, OPS_ASSUMPTION, OPS_CAVEAT, PERIOD, RUNWAY_ASSUMPTION, hub_label, kpi_table, socrata_window,
 )
 
 UNIVERSE_TEXT = (f"Percentiles are computed against the ranking universe: FAA "
@@ -128,11 +128,12 @@ def congestion_index(frames: Frames, names: list[str]) -> dict:
     sw = socrata_window(frames.socrata, WINDOW)
     return envelope(
         {"airports": rows, "weights": CONGESTION_WEIGHTS, "units": RAW_UNITS},
-        [SOURCE_LABELS[s] for s in ("delay", "socrata", "ourairports", "faa")], PERIOD,
+        [SOURCE_LABELS[s] for s in ("delay", "socrata", "ourairports", "faa")],
+        f"Delay & traffic: {window_label(WINDOW)}; Operations (Socrata): {window_label(sw)}",
         assumptions + [
             "Congestion index = weighted percentiles of delay rate, NAS delay share, operations per runway, "
             "cancellation rate (weights shown)",
-            UNIVERSE_TEXT, NAS_ASSUMPTION, OPS_ASSUMPTION,
+            UNIVERSE_TEXT, NAS_ASSUMPTION, OPS_ASSUMPTION, RUNWAY_ASSUMPTION,
         ],
         [DELAY_CAVEAT, OPS_CAVEAT,
          f"Uses Socrata's latest 12 months ({window_label(sw)}), one month earlier than the standard window",

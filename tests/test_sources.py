@@ -6,6 +6,7 @@ from data.quality import delay_cause_sum_violations
 from data.sources.delay_cause import aggregate_to_airport_month
 from data.sources.faa import combine_years, parse_enplanements
 from data.sources.ourairports import build as build_ourairports
+from data.sources.ourairports import build_runways
 from data.sources.socrata import parse_records
 
 
@@ -78,3 +79,24 @@ def test_ourairports_filters_us_commercial_and_ignores_closed_runways():
     assert list(out["iata"]) == ["BOS"]
     assert out.loc[0, "state"] == "MA"
     assert out.loc[0, "runway_count"] == 2 and out.loc[0, "longest_runway_ft"] == 10083
+
+
+def test_ourairports_runways_table_keeps_open_runways_of_us_commercial_airports():
+    airports = pd.DataFrame([
+        {"ident": "KSNA", "iata_code": "SNA", "icao_code": "KSNA", "iso_country": "US", "iso_region": "US-CA",
+         "scheduled_service": "yes", "name": "John Wayne", "municipality": "Santa Ana",
+         "latitude_deg": 33.7, "longitude_deg": -117.9, "type": "large_airport"},
+    ])
+    runways = pd.DataFrame([
+        {"id": 1, "airport_ident": "KSNA", "le_ident": "02L", "he_ident": "20R", "length_ft": 5700,
+         "width_ft": 150, "surface": "ASP", "closed": 0},
+        {"id": 2, "airport_ident": "KSNA", "le_ident": "02R", "he_ident": "20L", "length_ft": 2886,
+         "width_ft": 75, "surface": "ASP", "closed": 0},
+        {"id": 3, "airport_ident": "KSNA", "le_ident": "H1", "he_ident": None, "length_ft": 60,
+         "width_ft": 60, "surface": "CON", "closed": 1},
+        {"id": 4, "airport_ident": "KXXX", "le_ident": "09", "he_ident": "27", "length_ft": 9000,
+         "width_ft": 150, "surface": "ASP", "closed": 0},
+    ])
+    out = build_runways(airports, runways)
+    assert list(out["runway"]) == ["02L/20R", "02R/20L"]          # closed + other airports dropped
+    assert list(out["iata"]) == ["SNA", "SNA"]                    # length filter is applied in scoring, not here

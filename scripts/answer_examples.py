@@ -11,22 +11,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from data.repository import load_frames  # noqa: E402
 from scoring import metrics, ranking  # noqa: E402
+from scoring.common import window_label  # noqa: E402
+from scoring.config import MIN_COMMERCIAL_RUNWAY_FT, WINDOW  # noqa: E402
 
 
 def header(title: str) -> None:
     print("\n" + "=" * 100 + f"\n{title}\n" + "=" * 100)
 
 
-def footer(*envelopes: dict) -> None:
-    """Print the sources, period, assumptions and caveats of all envelopes used (deduplicated)."""
+def footer(*envelopes: dict, periods: dict[str, str] | None = None) -> None:
+    """Print the sources, period(s), assumptions and caveats of all envelopes used (deduplicated).
+
+    `periods` (label -> period) prints one labeled line per data period when sources differ.
+    """
     merged = {"sources": [], "assumptions": [], "caveats": []}
-    periods = []
     for env in envelopes:
         for key in merged:
             merged[key] += [x for x in env[key] if x not in merged[key]]
-        if env["data_period"] not in periods:
-            periods.append(env["data_period"])
-    print("\n  Data period: " + " | ".join(periods))
+    if periods:
+        print("\n  Data periods:")
+        for label, period in periods.items():
+            print(f"    - {label}: {period}")
+    else:
+        print("\n  Data period: " + envelopes[0]["data_period"])
     for key in ("sources", "assumptions", "caveats"):
         print(f"  {key.capitalize()}:")
         for item in merged[key]:
@@ -88,11 +95,19 @@ def q2(frames) -> None:
         print(f"  {label:<34}{dl[key]:>14}{ds[key]:>14}{dl['national'][key]:>12}")
     ol, os_ = ops[0]["data"], ops[1]["data"]
     print(f"  {'operations per runway':<34}{ol['operations_per_runway']:>14,.0f}{os_['operations_per_runway']:>14,.0f}")
-    print(f"  {'open runways':<34}{ol['runway_count']:>14.0f}{os_['runway_count']:>14.0f}")
+    print(f"  {'commercial runways (>= 5,000 ft)':<34}{ol['runway_count']:>14.0f}{os_['runway_count']:>14.0f}")
     pl, ps = profiles[0]["data"], profiles[1]["data"]
     print(f"  {'load factor (avg)':<34}{pl['load_factor_avg']:>14}{ps['load_factor_avg']:>14}")
     print(f"  {'passengers':<34}{pl['passengers']:>14,}{ps['passengers']:>14,}")
-    footer(cong, *delays, *ops, *profiles)
+    print(f"\n  Runways counted (>= {MIN_COMMERCIAL_RUNWAY_FT:,} ft):")
+    for o in ops:
+        od = o["data"]
+        excluded = f"; excluded (short): {', '.join(od['runways_excluded_short'])}" if od["runways_excluded_short"] else ""
+        print(f"    {od['airport']}: {', '.join(od['runways_counted'])}{excluded}")
+    footer(cong, *delays, *ops, *profiles, periods={
+        "Delay & traffic (BTS delay cause, T-100)": f"{window_label(WINDOW)} (trailing 12 months)",
+        "Operations (Socrata)": ops[0]["data"]["period"],
+    })
 
 
 # ------------------------------------------------------------------------------------------ Q3

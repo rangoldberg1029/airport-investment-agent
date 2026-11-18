@@ -38,5 +38,13 @@
     "period": "n/a",
     "rows": 679,
     "built": "2026-11-18"
+  },
+  "runways_us.parquet": {
+    "source": "runways",
+    "url": "https://davidmegginson.github.io/ourairports-data/runways.csv",
+    "access": "direct download",
+    "period": "n/a",
+    "rows": 1269,
+    "built": "2026-11-18"
   }
 }

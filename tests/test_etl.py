@@ -83,6 +83,8 @@ def processed_dir(tmp_path, t100_raw, delay_raw):
     pd.DataFrame({"iata": ["ANC"], "icao": ["PANC"], "name": ["Ted Stevens"], "city": ["Anchorage"],
                   "state": ["AK"], "lat": [61.2], "lon": [-150.0], "type": ["large_airport"],
                   "runway_count": [3], "longest_runway_ft": [12400]}).to_parquet(d / ourairports.CACHE_FILE)
+    pd.DataFrame({"iata": ["ANC"], "runway": ["07R/25L"], "length_ft": [12400.0], "width_ft": [200.0],
+                  "surface": ["ASP"]}).to_parquet(d / ourairports.RUNWAYS_CACHE_FILE)
     return d
 
 
@@ -93,6 +95,6 @@ def test_offline_build_creates_all_tables(processed_dir, tmp_path):
     with duckdb.connect(str(db), read_only=True) as con:
         names = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
         assert names == {"t100_routes", "delay_cause", "socrata_airport_months",
-                         "faa_enplanements", "airports", "etl_runs"}
+                         "faa_enplanements", "airports", "runways", "etl_runs"}
         assert con.execute("SELECT count(*) FROM t100_routes").fetchone()[0] == 1
         assert con.execute("SELECT faa_hub FROM airports WHERE iata='ANC'").fetchone()[0] == "M"

@@ -77,6 +77,7 @@ TABLE_KEYS = {
     "socrata_airport_months": ["year", "month", "airport"],
     "faa_enplanements": ["year", "airport"],
     "airports": ["iata"],
+    "runways": ["iata", "runway"],
 }
 
 

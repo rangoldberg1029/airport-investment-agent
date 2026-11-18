@@ -2,6 +2,7 @@
 
 import json
 
+import pandas as pd
 import pytest
 
 from scoring import metrics
@@ -58,6 +59,20 @@ def test_long_haul_thresholds_are_inclusive_and_seat_weighted(aaa):
 def test_ops_per_runway_uses_latest_12_socrata_months(frames, aaa):
     assert metrics.socrata_window(frames.socrata, ((2025, 9), (2026, 8))) == ((2025, 8), (2026, 7))
     assert aaa["ops_per_runway"] == pytest.approx(2 * 3_600 / 2)
+
+
+def test_commercial_runway_threshold_is_inclusive():
+    rw = pd.DataFrame({"iata": ["X"] * 3, "runway": ["a", "b", "c"], "length_ft": [5000.0, 4999.0, 9000.0]})
+    assert list(metrics.commercial_runways(rw)["runway"]) == ["a", "c"]
+
+
+def test_ops_envelope_lists_counted_and_excluded_runways(frames):
+    env = metrics.ops_per_runway(frames, "AAA")
+    d = env["data"]
+    assert d["runway_count"] == 2 and len(d["runways_counted"]) == 2
+    assert d["runways_excluded_short"] == ["GA1/GA2 (2,500 ft)"]
+    assert any("5,000 ft" in a for a in env["assumptions"])
+    assert env["data_period"].startswith("Operations (Socrata):")
 
 
 def test_missing_delay_data_stays_nan(frames):

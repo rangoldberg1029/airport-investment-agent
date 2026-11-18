@@ -26,6 +26,14 @@ LOAD_FACTOR_SENSITIVITY = (0.80,)
 RANKING_UNIVERSE_HUBS = ("L", "M", "S")
 HUB_NAMES = {"L": "large hub", "M": "medium hub", "S": "small hub", "N": "non-hub"}
 
+# ---------------------------------------------------------------- runways
+# Only open runways at least this long (feet, inclusive) count for operations per runway, i.e. runways
+# usable by commercial passenger jets. Drops short general-aviation runways such as SNA 02R/20L
+# (2,886 ft) and BOS 15L/33R (2,557 ft); keeps SNA 02L/20R (5,700 ft), the only jet runway at SNA.
+# Checked on all 384 open runways at FAA L/M/S hubs: no hub is left with zero runways at 5,000 ft
+# (at 5,500 ft one hub would be, at 6,000 ft three).
+MIN_COMMERCIAL_RUNWAY_FT = 5000
+
 # ---------------------------------------------------------------- index weights (each sums to 1)
 # Investment score components: demand pressure = load factor, growth = YoY passengers,
 # congestion = congestion index, scale = passengers. All percentile-normalised vs the universe.

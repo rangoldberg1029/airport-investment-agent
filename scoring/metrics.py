@@ -10,7 +10,7 @@ from scoring.common import (
     Window, envelope, in_window, pct, resolve_airport, rnd, shift_month, window_label,
 )
 from scoring.config import (
-    DEFAULT_LONG_HAUL_MI, HUB_NAMES, LONG_HAUL_THRESHOLDS_MI, PRIOR_WINDOW,
+    DEFAULT_LONG_HAUL_MI, HUB_NAMES, LONG_HAUL_THRESHOLDS_MI, MIN_COMMERCIAL_RUNWAY_FT, PRIOR_WINDOW,
     RANKING_UNIVERSE_HUBS, SOURCE_LABELS, WINDOW,
 )
 
@@ -23,7 +23,10 @@ COMPLETION_CAVEAT = ("Completion gap covers US carriers only: foreign carriers r
 NAS_ASSUMPTION = ("NAS share = NAS delay minutes / sum of the five delay-cause minutes "
                   "(NAS = airport/airspace capacity, ATC, non-extreme weather)")
 OPS_ASSUMPTION = "Operations = 2 x departures (arrivals assumed equal to departures), all carriers incl. cargo"
-OPS_CAVEAT = "Operations per runway is a rough proxy: ignores runway configuration, length, simultaneous use and general aviation"
+RUNWAY_ASSUMPTION = (f"Runways counted = open runways >= {MIN_COMMERCIAL_RUNWAY_FT:,} ft (usable by commercial "
+                     f"passenger jets); shorter general-aviation runways are excluded")
+OPS_CAVEAT = ("Operations per runway is a rough proxy: ignores runway configuration, simultaneous use, "
+              "crosswind-only runways and general-aviation traffic")
 DELAY_CAVEAT = ("Delay data covers large US 'reporting carriers' and domestic arrivals only "
                 "(international and small-carrier flights are not included).")
 
@@ -113,12 +116,20 @@ def socrata_window(socrata: pd.DataFrame, window: Window) -> Window:
     return shift_month(end, -11), end
 
 
-def ops_kpis(socrata: pd.DataFrame, airports: pd.DataFrame, window: Window) -> pd.DataFrame:
-    """Operations per open runway: 2 x all-carrier departures (arrivals ~ departures) / runways."""
+def commercial_runways(runways: pd.DataFrame, min_length_ft: int = MIN_COMMERCIAL_RUNWAY_FT) -> pd.DataFrame:
+    """Open runways long enough for commercial passenger jets (inclusive threshold)."""
+    return runways[runways["length_ft"] >= min_length_ft]
+
+
+def ops_kpis(socrata: pd.DataFrame, runways: pd.DataFrame, window: Window) -> pd.DataFrame:
+    """Operations per commercial runway: 2 x all-carrier departures (arrivals ~ departures) / runways."""
     sw = socrata_window(socrata, window)
     deps = socrata[in_window(socrata, sw)].groupby("airport")["departures"].sum()
-    runways = airports.set_index("iata")["runway_count"]
-    out = pd.DataFrame({"socrata_departures": deps, "runway_count": runways})
+    out = pd.DataFrame({
+        "socrata_departures": deps,
+        "runway_count": commercial_runways(runways).groupby("iata").size(),
+        "runway_count_all_open": runways.groupby("iata").size(),
+    })
     out["ops_per_runway"] = _safe_div(2 * out["socrata_departures"], out["runway_count"])
     return out
 
@@ -144,7 +155,7 @@ def kpi_table(frames: Frames, window: Window = WINDOW, prior: Window = PRIOR_WIN
     k = traffic_kpis(frames.t100, window, prior)
     k = k.join(long_haul_kpis(frames.t100, window), how="left")
     k = k.join(delay_kpis(frames.delay, window), how="left")
-    k = k.join(ops_kpis(frames.socrata, frames.airports, window), how="left")
+    k = k.join(ops_kpis(frames.socrata, frames.runways, window), how="left")
     k = k.join(faa_kpis(frames.faa), how="left")
     k["state"] = k["state_faa"].fillna(k["state_t100"])
     k["in_universe"] = k["hub"].isin(RANKING_UNIVERSE_HUBS)
@@ -258,12 +269,18 @@ def long_haul_share(frames: Frames, name: str, thresholds=LONG_HAUL_THRESHOLDS_M
 def ops_per_runway(frames: Frames, name: str) -> dict:
     r, assumptions = _row(frames, name)
     sw = socrata_window(frames.socrata, WINDOW)
+    rw = frames.runways[frames.runways["iata"] == r.name]
+    counted = commercial_runways(rw)
+    excluded = rw.drop(counted.index)
+    fmt = lambda df: [f"{x.runway} ({x.length_ft:,.0f} ft)" for x in df.itertuples()]
     data = {"airport": r.name, "operations_per_runway": rnd(r["ops_per_runway"], 0),
             "runway_count": r["runway_count"], "all_carrier_departures": r["socrata_departures"],
+            "runways_counted": fmt(counted), "runways_excluded_short": fmt(excluded),
             "period": window_label(sw)}
     return envelope(
-        data, [SOURCE_LABELS["socrata"], SOURCE_LABELS["ourairports"]], window_label(sw),
-        assumptions + [OPS_ASSUMPTION],
+        data, [SOURCE_LABELS["socrata"], SOURCE_LABELS["ourairports"]],
+        f"Operations (Socrata): {window_label(sw)}",
+        assumptions + [OPS_ASSUMPTION, RUNWAY_ASSUMPTION],
         [OPS_CAVEAT,
          f"Uses Socrata's latest 12 months ({window_label(sw)}), one month earlier than the standard window"],
     )

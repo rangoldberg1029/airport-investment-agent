@@ -8,7 +8,7 @@ import pandas as pd
 
 from data.db import DB_PATH
 
-TABLES = ("t100_routes", "delay_cause", "socrata_airport_months", "faa_enplanements", "airports")
+TABLES = ("t100_routes", "delay_cause", "socrata_airport_months", "faa_enplanements", "airports", "runways")
 
 
 @dataclass
@@ -20,6 +20,7 @@ class Frames:
     socrata: pd.DataFrame
     faa: pd.DataFrame
     airports: pd.DataFrame
+    runways: pd.DataFrame = field(default_factory=pd.DataFrame)
     cache: dict = field(default_factory=dict, repr=False)
 
 
@@ -29,4 +30,4 @@ def load_frames(db_path: Path = DB_PATH) -> Frames:
     with duckdb.connect(str(db_path), read_only=True) as con:
         t = {name: con.execute(f"SELECT * FROM {name}").df() for name in TABLES}
     return Frames(t["t100_routes"], t["delay_cause"], t["socrata_airport_months"],
-                  t["faa_enplanements"], t["airports"])
+                  t["faa_enplanements"], t["airports"], t["runways"])

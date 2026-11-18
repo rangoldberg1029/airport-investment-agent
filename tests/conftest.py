@@ -50,7 +50,8 @@ def delay_raw() -> pd.DataFrame:
 #   long-haul >=3000: departures 36/156, seats 8,400/20,400; >=4000: 12/156
 #   completion gap (short route only has a US schedule: 11 scheduled, 10 performed) = 1 - 120/132
 #   delay: per month 100 arrivals, 20 delayed, 2 cancelled; causes 200 min (NAS 50) but arr_delay 210
-#   socrata: 300 departures/month, latest month 2026-07; 2 runways -> 2*3600/2 = 3600 ops per runway
+#   socrata: 300 departures/month, latest month 2026-07; 2 commercial runways (+1 short GA runway,
+#   not counted) -> 2*3600/2 = 3600 ops per runway
 
 def _months(start=(2024, 9), n=24):
     y, m = start
@@ -109,5 +110,13 @@ def frames():
         airports.append({"iata": iata, "icao": "K" + iata, "name": f"{city} Intl", "city": city, "state": "CA",
                          "lat": 0.0, "lon": 0.0, "type": "large_airport", "runway_count": 2,
                          "longest_runway_ft": 10_000, "faa_hub": "L"})
+    # commercial runways: `runways` x 8,000 ft, plus one 4,999-ft and one exactly 5,000-ft runway rule check
+    # below: every airport also gets a short GA runway (2,500 ft) that must NOT be counted.
+    runway_rows = []
+    for iata, spec in AIRPORT_SPECS.items():
+        for i in range(spec[6]):
+            runway_rows.append({"iata": iata, "runway": f"{i + 1}L/{i + 1}R", "length_ft": 8000.0,
+                                "width_ft": 150.0, "surface": "ASP"})
+        runway_rows.append({"iata": iata, "runway": "GA1/GA2", "length_ft": 2500.0, "width_ft": 75.0, "surface": "ASP"})
     return Frames(pd.DataFrame(t100), pd.DataFrame(delay), pd.DataFrame(socrata),
-                  pd.DataFrame(faa), pd.DataFrame(airports))
+                  pd.DataFrame(faa), pd.DataFrame(airports), pd.DataFrame(runway_rows))
