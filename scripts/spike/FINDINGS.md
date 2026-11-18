@@ -102,3 +102,11 @@ The 3,000 mi line sits between MSP/ORD and DFW, so the answer is **very sensitiv
 3. **Long-haul share** default threshold = **3,000 statute miles**, always shown with the
    **2,500 / 4,000 mi sensitivity table** and **both departure-weighted and seat-weighted** shares.
 4. **Standard window** = trailing 12 months **Sep 2025 – Aug 2026** (B + C); stated in every answer.
+
+## Found during ETL (step 3)
+- **Delay-cause minutes don't always add up.** In 8,600 airport-months, the five cause columns differ from
+  `arr_delay` by 31,630 of 240M minutes in total (0.013%). Only 4 airport-months differ by > 5% (small airports such as
+  BOI, BZN, HDN, Nov 2025). This is in the source data. **Step 4:** compute the NAS share as
+  `nas_delay / (sum of the five cause columns)` so the shares always add up to 100%.
+- **Passengers > seats** only at tiny airports (≤ 18 passengers in a month) – reporting noise. The quality check
+  ignores airport-months with < 1,000 seats.

@@ -1,0 +1,42 @@
+{
+  "t100_routes.parquet": {
+    "source": "t100_routes",
+    "url": "https://www.transtats.bts.gov/DL_SelectFields.aspx?gnoyr_VQ=FMG&QO_fu146_anzr=Nv4",
+    "access": "manual download",
+    "period": "2024-01..2026-08",
+    "rows": 419215,
+    "built": "2026-11-18"
+  },
+  "delay_cause.parquet": {
+    "source": "delay_cause",
+    "url": "https://www.transtats.bts.gov/OT_Delay/OT_DelayCause1.asp",
+    "access": "public web form (scripted)",
+    "period": "2024-09..2026-08",
+    "rows": 8600,
+    "built": "2026-11-18"
+  },
+  "socrata_airport_months.parquet": {
+    "source": "socrata_airport_months",
+    "url": "https://data.bts.gov/resource/r495-tyji.json",
+    "access": "public API",
+    "period": "2024-01..2026-07",
+    "rows": 28035,
+    "built": "2026-11-18"
+  },
+  "faa_enplanements.parquet": {
+    "source": "faa_enplanements",
+    "url": "https://www.faa.gov/airports/planning_capacity/passenger_allcargo_stats/passenger/arp-cy2025-commercial-service-enplanements.xlsx + https://www.faa.gov/sites/faa.gov/files/2026-09/arp-cy2024-commercial-service-enplanements.xlsx",
+    "access": "direct download",
+    "period": "2023..2025",
+    "rows": 1552,
+    "built": "2026-11-18"
+  },
+  "ourairports_us.parquet": {
+    "source": "ourairports_us",
+    "url": "https://davidmegginson.github.io/ourairports-data/airports.csv + https://davidmegginson.github.io/ourairports-data/runways.csv",
+    "access": "direct download",
+    "period": "n/a",
+    "rows": 679,
+    "built": "2026-11-18"
+  }
+}
