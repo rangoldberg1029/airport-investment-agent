@@ -9,7 +9,7 @@ Test airports used for every probe: BOS, LAX, SNA, ANC, SFO.
 | ID | Source | URL | Access | Grain | Coverage (latest) | Works? |
 |---|---|---|---|---|---|---|
 | A | BTS Socrata: *AFF - T100 Segment Summary By Origin Airport* (`r495-tyji`) | https://data.bts.gov/resource/r495-tyji.json | API (SODA, no key) | origin airport × month | 2014-01 → **2026-07** | Yes |
-| B | BTS TranStats: *T-100 Segment (All Carriers)* | https://www.transtats.bts.gov/DL_SelectFields.aspx?gnoyr_VQ=FMG&QO_fu146_anzr=Nv4 | **Manual download** (ASP.NET postback form) | carrier × origin × dest × aircraft × class × month | 1990 → **2026-08** | Page yes; file not yet downloaded |
+| B | BTS TranStats: *T-100 Segment (All Carriers)* | https://www.transtats.bts.gov/DL_SelectFields.aspx?gnoyr_VQ=FMG&QO_fu146_anzr=Nv4 | **Manual download** (ASP.NET postback form) | carrier × origin × dest × aircraft × class × month | 1990 → **2026-08** | Yes – 2024 + 2025 downloaded 2026-11-18; **2026 still missing** |
 | C | BTS TranStats: *Airline On-Time Delay Cause* | https://www.transtats.bts.gov/OT_Delay/OT_DelayCause1.asp | Scripted: form POST (period) → GET of the page's "Download Raw Data" link → zip | carrier × arrival airport × month | 2003-06 → **2026-08** | Yes |
 | D | FAA Passenger Boarding (Enplanements), commercial service airports | CY2025: https://www.faa.gov/airports/planning_capacity/passenger_allcargo_stats/passenger/arp-cy2025-commercial-service-enplanements.xlsx  ·  CY2024: https://www.faa.gov/sites/faa.gov/files/2026-09/arp-cy2024-commercial-service-enplanements.xlsx | Direct download (.xlsx) | airport × calendar year | **CY2025** (522 airports) | Yes |
 | E | OurAirports | https://davidmegginson.github.io/ourairports-data/airports.csv  ·  `.../runways.csv` | Direct download (CSV) | airport / runway | updated nightly (Last-Modified 2026-11-18) | Yes |
@@ -48,6 +48,10 @@ Test airports used for every probe: BOS, LAX, SNA, ANC, SFO.
 5. Save the zip as `data/raw/t100_segment/T100_SEGMENT_2024.zip`.
 6. Repeat for **2025** and **2026** (2026 = Jan–Aug, the latest available).
 7. Run `python scripts/spike/probe_b_t100_segment.py` – it prints columns, months and sample rows.
+
+Downloaded files (2026-11-18): `T_T100_SEGMENT_ALL_CARRIER_<timestamp>.zip`, each containing
+`T_T100_SEGMENT_ALL_CARRIER.csv` with all 50 fields (~19 MB zipped, ~570k rows per year). No term-definitions
+file was included. Status: 2024 ✅, 2025 ✅ (downloaded twice – one copy can be deleted), **2026 ❌ missing**.
 
 Why 2024–2026: trailing 12 months (Sep 2025–Aug 2026) plus the prior 12 months for YoY.
 
