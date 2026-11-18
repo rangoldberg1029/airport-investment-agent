@@ -6,6 +6,7 @@ import altair as alt
 import pandas as pd
 
 from agent.tools import ToolCallRecord
+from ui.key_facts import label
 
 Table = tuple[str, pd.DataFrame]
 
@@ -15,7 +16,7 @@ def _components_long(rows: list[dict], label_key: str = "airport") -> pd.DataFra
     out = []
     for r in rows:
         for c in r["components"]:
-            out.append({label_key: r[label_key], "component": c["component"], "value": c["raw_value"],
+            out.append({label_key: r[label_key], "component": label(c["component"]), "value": c["raw_value"],
                         "percentile": c["percentile"], "weight": c["weight"], "contribution": c["contribution"]})
     return pd.DataFrame(out)
 
@@ -59,7 +60,11 @@ def tables_long_haul(d: dict) -> list[Table]:
 def tables_unmet(d: dict) -> list[Table]:
     u = d["unmet_demand"]
     comps = pd.DataFrame(u["components"]).rename(columns={"raw_value": "value"})
+    comps["component"] = comps["component"].map(label)
     drivers = pd.DataFrame(u["drivers_above_peer_median"])
+    if not drivers.empty:
+        drivers["component"] = drivers["component"].map(label)
+        drivers = drivers.rename(columns={"peer_median": "peer median"})
     gaps = []
     for target, entry in u["capacity_gap"].items():
         for period in ("window", "peak_month"):
@@ -115,13 +120,21 @@ def tables(record: ToolCallRecord) -> list[Table]:
 
 # ---------------------------------------------------------------- charts
 
+TICKS = 5
+
+
 def _stacked(df: pd.DataFrame, y: str, title: str, order: list[str]) -> alt.Chart:
+    """Horizontal stacked bars: one bar per airport, one segment per score component."""
     return (alt.Chart(df, title=title)
             .mark_bar()
-            .encode(x=alt.X("contribution:Q", title="contribution (points of 100)", stack="zero"),
+            .encode(x=alt.X("contribution:Q", title="Score points (0-100)", stack="zero",
+                            axis=alt.Axis(tickCount=TICKS)),
                     y=alt.Y(f"{y}:N", sort=order, title=None),
-                    color=alt.Color("component:N", legend=alt.Legend(orient="bottom", title=None)),
-                    tooltip=[y, "component", "value", "percentile", "weight", "contribution"])
+                    color=alt.Color("component:N", legend=alt.Legend(orient="bottom", title="Component", columns=3)),
+                    tooltip=[alt.Tooltip(f"{y}:N", title="Airport"), alt.Tooltip("component:N", title="Component"),
+                             alt.Tooltip("value", title="Value"), alt.Tooltip("percentile:Q", title="Percentile"),
+                             alt.Tooltip("weight:Q", title="Weight"),
+                             alt.Tooltip("contribution:Q", title="Points")])
             .properties(height=max(120, 34 * len(order))))
 
 
@@ -145,14 +158,20 @@ def chart(record: ToolCallRecord) -> alt.Chart | None:
             return _stacked(df, "airport", f"Unmet-demand proxy by component ({u['unmet_demand_score']} / 100)",
                             [u["airport"]])
         if record.name == "long_haul_share":
-            df = pd.DataFrame(d["sensitivity"]).melt("threshold_mi", var_name="measure", value_name="share %")
-            df["measure"] = df["measure"].map({"departure_share_pct": "departures", "seat_share_pct": "seats"})
-            return (alt.Chart(df, title=f"{d['airport']}: long-haul share by threshold")
+            df = pd.DataFrame(d["sensitivity"]).melt("threshold_mi", var_name="measure", value_name="share")
+            df["measure"] = df["measure"].map({"departure_share_pct": "Share of departures",
+                                               "seat_share_pct": "Share of seats"})
+            df["threshold"] = df["threshold_mi"].map(lambda t: f"{t:,} mi")
+            return (alt.Chart(df, title=f"{d['airport']}: long-haul share by distance threshold")
                     .mark_bar()
-                    .encode(x=alt.X("threshold_mi:O", title="threshold (statute miles)"),
-                            xOffset="measure:N", y=alt.Y("share %:Q"),
+                    .encode(x=alt.X("threshold:N", title="Minimum segment distance", sort=None,
+                                    axis=alt.Axis(labelAngle=0)),
+                            xOffset="measure:N",
+                            y=alt.Y("share:Q", title="Share (%)", axis=alt.Axis(tickCount=TICKS)),
                             color=alt.Color("measure:N", legend=alt.Legend(orient="bottom", title=None)),
-                            tooltip=["threshold_mi", "measure", "share %"])
+                            tooltip=[alt.Tooltip("threshold:N", title="Threshold"),
+                                     alt.Tooltip("measure:N", title="Measure"),
+                                     alt.Tooltip("share:Q", title="Share (%)")])
                     .properties(height=240))
     except (KeyError, TypeError, ValueError):
         return None

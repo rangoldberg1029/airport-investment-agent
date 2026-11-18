@@ -76,7 +76,7 @@ def grade(result, acceptable: set[str], no_tool_ok: bool, check) -> tuple[bool, 
 
 
 def run(effort: str, show_answers: bool) -> dict:
-    client = OpenAIChat(reasoning_effort=effort)
+    client = OpenAIChat(reasoning_effort=effort, fallback_model="")   # measure one model alone
     agent = Agent(client, load_frames())
     print(f"\n{'#' * 100}\n# reasoning_effort = {effort}   model = {client.model}\n{'#' * 100}")
     rows = []

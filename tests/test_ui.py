@@ -26,11 +26,25 @@ def records(frames):
 def test_key_facts_come_from_tool_outputs(records):
     facts = key_facts(list(records.values()))
     text = "\n".join(facts)
-    assert "investment score" in text and "Top 3 across weight presets" in text
-    assert "has the higher congestion index" in text and "RAISES operations per runway" in text
-    assert "23.08% of 156 passenger departures fly >= 3,000 statute miles" in text
-    assert "unmet-demand proxy score" in text and "Target LF 0.85" in text
+    assert "investment score" in text and "Top 3 is" in text
+    assert "Why the indices differ (AAA minus BBB" in text and "RAISES operations per runway" in text
+    assert "23.08% of 156 passenger departures fly 3,000 statute miles or more" in text
+    assert "unmet-demand proxy score" in text
+    assert "Capacity gap at target load factor 0.85: 12-month window" in text and "peak month 2026-07" in text
     assert "AAA (large hub, MA)" in text
+
+
+def test_key_facts_are_human_readable(records):
+    text = "\n".join(key_facts(list(records.values())))
+    for snake in ("lf_avg", "lf_peak", "nas_share", "delay_rate", "growth_yoy", "ops_per_runway", "_pct"):
+        assert snake not in text, snake
+    assert "Average load factor" in text and "Arrival delay rate" in text
+
+
+def test_capacity_gap_lines_have_seat_and_departure_numbers(records):
+    lines = [f for f in key_facts([records["unmet_demand"]]) if f.startswith("Capacity gap")]
+    assert len(lines) == 2
+    assert any("seats (+" in line and "departures" in line for line in lines)
 
 
 def test_key_facts_report_errors_without_raising(frames):
@@ -55,6 +69,9 @@ def test_evidence_numeric_columns(records):
 def test_charts_build(records, name):
     spec = evidence.chart(records[name]).to_dict()
     assert spec["mark"]["type"] == "bar"
+    text = str(spec)
+    assert "_pct" not in text and "lf_avg" not in text and "nas_share" not in text   # readable legends
+    assert "'tickCount': 5" in text
 
 
 def test_no_chart_for_profile_or_errors(records, frames):

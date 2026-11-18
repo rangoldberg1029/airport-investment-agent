@@ -181,12 +181,17 @@ def _ft(label: str) -> int:
     return int(label.rsplit("(", 1)[1].split(" ft")[0].replace(",", ""))
 
 
+def contribution_differences(contrib_base: dict, contrib_other: dict) -> list[tuple[str, float]]:
+    """(component, base - other) in index points, largest absolute difference first."""
+    diffs = {k: round(contrib_base[k] - contrib_other[k], 2) for k in contrib_base}
+    return sorted(diffs.items(), key=lambda kv: -abs(kv[1]))
+
+
 def difference_drivers(base: str, other: str, contrib_base: dict, contrib_other: dict,
                        index_base: float, index_other: float) -> dict:
     """Rank the component contribution differences (base - other) by size and say whose index each raises."""
-    diffs = {k: round(contrib_base[k] - contrib_other[k], 2) for k in contrib_base}
-    ranked = sorted(diffs.items(), key=lambda kv: -abs(kv[1]))
-    net = round(sum(diffs.values()), 2)
+    ranked = contribution_differences(contrib_base, contrib_other)
+    net = round(sum(v for _, v in ranked), 2)
     higher = base if net > 0 else other
     parts = ", ".join(f"{k} {v:+.2f} pts" for k, v in ranked)
     return {
@@ -382,6 +387,7 @@ def unmet_demand(frames: Frames, airport: str) -> tuple[dict, dict]:
         for target, entry in d["capacity_gap"].items()
     }
     data = {
+        "headline": d["capacity_gap_headline"],
         "airport": d["airport"], "hub": d["hub"], "unmet_demand_score": u(d["unmet_demand_score"], "/ 100"),
         "components_header": COMP_HEADER, "components": comp_rows(d["components"]),
         "component_meanings": UNMET_MEANINGS,

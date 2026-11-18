@@ -6,6 +6,7 @@ and their tool messages are dropped (token budget).
 All tool records are kept in the Agent for the UI and for the number check.
 """
 
+import copy
 import json
 from dataclasses import dataclass, field
 from typing import Callable
@@ -37,6 +38,7 @@ class TurnResult:
     total_tokens: int = 0
     llm_calls: int = 0
     error: str | None = None
+    models: list[str] = field(default_factory=list)      # models that answered, in order (primary/fallback)
 
 
 class Agent:
@@ -65,19 +67,28 @@ class Agent:
     def reset(self) -> None:
         self.turns = []
 
+    def restore_turn(self, turn: Turn) -> None:
+        """Add a previously computed turn (e.g. a cached first answer) so follow-ups have its context."""
+        self.turns.append(copy.deepcopy(turn))
+
     # ---------------------------------------------------------------- loop
     def ask(self, text: str, on_event: Callable[..., None] | None = None) -> TurnResult:
         """Answer one user message. `on_event(event, **details)` reports progress to a UI:
         llm_call(round, after_tools), tool_start(name, args), tool_done(name, error)."""
         emit = on_event or (lambda event, **kw: None)
         turn = Turn(user=text)
-        tokens, calls = 0, 0
+        tokens, calls, models = 0, 0, []
+
+        def track(resp) -> None:
+            if getattr(resp, "model", "") and resp.model not in models:
+                models.append(resp.model)
         try:
             answer = None
             for round_no in range(self.max_tool_rounds):
                 emit("llm_call", round=round_no, after_tools=bool(turn.records))
                 resp = self.client.complete(self.messages(turn), TOOL_SCHEMAS)
                 tokens, calls = tokens + resp.total_tokens, calls + 1
+                track(resp)
                 if not resp.tool_calls:
                     answer = resp.content
                     break
@@ -86,11 +97,12 @@ class Agent:
                 emit("llm_call", round=self.max_tool_rounds, after_tools=True)
                 resp = self.client.complete(self.messages(turn), TOOL_SCHEMAS, tool_choice="none")
                 tokens, calls, answer = tokens + resp.total_tokens, calls + 1, resp.content
+                track(resp)
         except RateLimited as exc:
-            return TurnResult(str(exc), turn.records, [], tokens, calls, error="rate_limited")
+            return TurnResult(str(exc), turn.records, [], tokens, calls, error="rate_limited", models=models)
         except Exception as exc:  # provider/network errors: do not crash the UI
             return TurnResult(f"Sorry, the language model call failed ({type(exc).__name__}). Please try again.",
-                              turn.records, [], tokens, calls, error=str(exc))
+                              turn.records, [], tokens, calls, error=str(exc), models=models)
 
         turn.answer = answer.strip() or "I could not produce an answer. Please rephrase the question."
         self.turns.append(turn)
@@ -98,7 +110,7 @@ class Agent:
         # differences and ranked drivers live only there) count as traceable sources.
         everything = [x for t in self.turns for r in t.records for x in (r.envelope, r.llm_view)]
         check = untraceable_numbers(turn.answer, everything, user_text=text)
-        return TurnResult(turn.answer, turn.records, check, tokens, calls)
+        return TurnResult(turn.answer, turn.records, check, tokens, calls, models=models)
 
     def _run_tools(self, turn: Turn, resp, emit: Callable[..., None]) -> None:
         turn.steps.append({

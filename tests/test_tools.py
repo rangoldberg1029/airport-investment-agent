@@ -88,6 +88,14 @@ def test_unmet_demand_drivers_include_difference_to_median(frames):
     assert entry["peak_month"]["month"] == "2026-07"
 
 
+def test_unmet_view_leads_with_capacity_gap_headline(frames):
+    d = view(execute_tool("unmet_demand", {"airport": "AAA"}, frames))["data"]
+    assert list(d)[0] == "headline"
+    h = d["headline"]
+    assert "at target LF 0.85: 12-month window" in h and "at target LF 0.80: 12-month window" in h
+    assert h.count("peak month 2026-07") == 2                   # both targets cover both periods
+
+
 def test_percentiles_have_one_decimal(frames):
     d = view(execute_tool("unmet_demand", {"airport": "AAA"}, frames))["data"]
     pctiles = [row[2] for row in d["components"]] + [row[4] for row in d["drivers_above_peer_median"]]

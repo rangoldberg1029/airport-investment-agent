@@ -28,6 +28,12 @@ def test_codes_and_identifiers_are_not_numbers():
     assert values("BTS T‑100 and T–100") == []        # non-breaking hyphen / en dash used by LLMs
 
 
+def test_unicode_minus_signs_and_thousands():
+    assert values("ops/runway (‑30,802 ops)") == [(-30802, 0, False)]   # LLM-style non-breaking hyphen
+    assert values("down −1.88%") == [(-1.88, 2, True)]
+    assert untraceable_numbers("change ‑30,802 operations", [{"d": "+30,802 ops"}]) == []
+
+
 def test_matches_with_rounding_and_percent_conversion():
     answer = "Delay rate 33.4% (vs 22.0% nationally), load factor 81.7%, about 36.5 million passengers, growth -1.9%."
     assert untraceable_numbers(answer, TOOL) == []

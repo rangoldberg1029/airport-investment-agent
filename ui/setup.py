@@ -51,6 +51,14 @@ def data_info() -> dict:
         return {"sources": [], "built": None}
 
 
+@st.cache_resource(show_spinner=False)
+def get_answer_cache():
+    """One answer cache per server process (first questions of a conversation only)."""
+    from ui.cache import AnswerCache
+
+    return AnswerCache()
+
+
 def make_client():
     """The real LLM client (Groq by default; provider set via LLM_BASE_URL / LLM_MODEL)."""
     from agent.llm import OpenAIChat

@@ -171,6 +171,23 @@ def capacity_gap_interpretation(target: float, window: dict, peak: dict, peak_mo
             f"extra seats are needed across the year, more so in the peak month {peak_month}")
 
 
+def _gap_text(g: dict) -> str:
+    if g["extra_seats"] == 0:
+        return f"0 extra seats (LF {g['current_load_factor']})"
+    return (f"+{g['extra_seats']:,} seats (+{g['extra_seats_pct']}%, ~{g['extra_departures']:,} departures; "
+            f"LF {g['current_load_factor']})")
+
+
+def capacity_gap_headline(capacity_gap: dict) -> str:
+    """One unambiguous sentence: every target x both periods (12-month window and peak month)."""
+    parts = []
+    for target, entry in capacity_gap.items():
+        lf = target.split("_")[1]
+        parts.append(f"at target LF {lf}: 12-month window {_gap_text(entry['window'])}; "
+                     f"peak month {entry['peak_month']['month']} {_gap_text(entry['peak_month'])}")
+    return "Capacity gap (extra seats needed to bring load factor down to the target) - " + " | ".join(parts)
+
+
 def unmet_demand(frames: Frames, name: str) -> dict:
     """Unmet-demand proxy (0-100), drivers vs FAA hub peers, and a capacity-gap estimate."""
     iata, a = resolve_airport(name, frames.airports)
@@ -218,6 +235,7 @@ def unmet_demand(frames: Frames, name: str) -> dict:
             "drivers_above_peer_median": drivers,
             "peer_group": f"{hub_label(r['hub'])}s in the ranking universe (n={len(peers)})",
             "capacity_gap": gaps,
+            "capacity_gap_headline": capacity_gap_headline(gaps),
             "units": RAW_UNITS,
         },
         ALL_SOURCES[:2] + [SOURCE_LABELS["faa"]], PERIOD,

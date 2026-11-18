@@ -14,7 +14,8 @@ from scoring.config import (
 
 NUMBER_RE = re.compile(
     r"(?<![\w.\-/‐‑‒–—])"   # not part of a word, code or range like T-100 (any hyphen)
-    r"([+\-−]?)"                                 # sign (incl. unicode minus)
+    r"(?<!\d,)"                                       # never start inside 30,802
+    r"([+\-−‐‑‒–]?)"         # sign: ASCII/unicode minus and hyphens
     r"(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?"           # 1,234,567 | 1234 | 12.5
     r"(?:st|nd|rd|th)?"                               # ordinals: 63.7th percentile
     r"(?:\s?(%|pp\b|percentage points?))?"            # percent markers
@@ -40,7 +41,7 @@ def extract_numbers(text: str) -> list[Number]:
     for m in NUMBER_RE.finditer(text or ""):
         sign, whole, frac, pct, scale_word = m.groups()
         value = float(whole.replace(",", "") + ("." + frac if frac else ""))
-        if sign in ("-", "−"):
+        if sign and sign != "+":
             value = -value
         scale = SCALE.get((scale_word or "").lower(), 1.0)
         start, end = max(0, m.start() - 40), min(len(text), m.end() + 40)

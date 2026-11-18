@@ -85,8 +85,14 @@ def render_evidence(records: list[ToolCallRecord]) -> None:
             st.caption("**Caveats:**\n" + "\n".join(f"- {c}" for c in env["caveats"]))
 
 
-def render_assistant(message: dict) -> None:
-    """Answer text, then 'Key facts' (computed), number-check warning, and the Evidence expander."""
+def render_assistant(message: dict, show_meta: bool = True) -> None:
+    """Answer text, then 'Key facts' (computed), number-check warning, and the Evidence expander.
+    show_meta=False when the live status label already shows the 'Done' line (avoid showing it twice)."""
+    if message.get("cached"):
+        if hasattr(st, "badge"):
+            st.badge("Cached result", icon=":material/bolt:", color="gray")
+        else:
+            st.caption("Cached result")
     st.markdown(message["text"])
     records = message.get("records") or []
     facts = key_facts(records)
@@ -102,5 +108,5 @@ def render_assistant(message: dict) -> None:
         with st.expander(f"Evidence ({len(records)} tool call{'s' if len(records) != 1 else ''})"):
             render_evidence(records)
     meta = message.get("meta")
-    if meta:
+    if meta and show_meta:
         st.caption(meta)

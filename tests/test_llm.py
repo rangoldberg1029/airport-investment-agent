@@ -110,3 +110,67 @@ def test_pacer_window_expiry():
     pacer.record(900)
     now[0] = 61
     assert pacer.used() == 0
+
+
+def test_wait_needed_does_not_sleep():
+    now = [0.0]
+    pacer = TpmPacer(limit=8000, window=60, clock=lambda: now[0], sleep=lambda s: pytest.fail("slept"))
+    assert pacer.wait_needed(1000) == 0
+    pacer.record(7500)
+    now[0] = 20
+    assert pacer.wait_needed(1000) == pytest.approx(40.5)       # until the 7,500 expires
+    assert pacer.wait_needed(20000) == 60                      # bigger than the limit
+
+
+class _Seq:
+    """Stub returning raw responses or raising per call; records the model of each call."""
+
+    def __init__(self, outcomes):
+        self.outcomes, self.models = list(outcomes), []
+        outer = self
+
+        class _Raw:
+            def create(self, **kwargs):
+                outer.models.append(kwargs["model"])
+                item = outer.outcomes.pop(0)
+                if isinstance(item, Exception):
+                    raise item
+                return item
+        self.chat = type("Chat", (), {"completions": type("Comp", (), {"with_raw_response": _Raw()})()})()
+
+
+def _raw(content="ok", tokens=100):
+    msg = type("M", (), {"content": content, "tool_calls": None})()
+    usage = type("U", (), {"total_tokens": tokens, "prompt_tokens": tokens, "completion_tokens": 0})()
+    parsed = type("C", (), {"choices": [type("Ch", (), {"message": msg})()], "usage": usage})()
+    return type("R", (), {"headers": {}, "parse": lambda self: parsed})()
+
+
+def _client(**kw):
+    from agent.llm import OpenAIChat
+    return OpenAIChat(api_key="test", model="openai/gpt-oss-120b", fallback_model="openai/gpt-oss-20b",
+                      sleep=lambda s: None, **kw)
+
+
+def test_fallback_on_primary_429_without_retrying_primary():
+    client = _client()
+    client.client = _Seq([Http429(retry_after="40"), _raw("from fallback")])
+    resp = client.complete([{"role": "user", "content": "hi"}], tools=[])
+    assert resp.content == "from fallback" and resp.model == "openai/gpt-oss-20b"
+    assert client.client.models == ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+
+
+def test_fallback_when_primary_budget_would_wait_too_long():
+    client = _client()
+    client.pacer.record(7900)                                  # primary window nearly full
+    client.client = _Seq([_raw("fast")])
+    resp = client.complete([{"role": "user", "content": "hi"}], tools=[])
+    assert resp.model == "openai/gpt-oss-20b"
+
+
+def test_no_fallback_configured_keeps_primary():
+    from agent.llm import OpenAIChat
+    client = OpenAIChat(api_key="test", model="openai/gpt-oss-120b", fallback_model="", sleep=lambda s: None)
+    assert client.fallback_model is None
+    client.client = _Seq([_raw()])
+    assert client.complete([{"role": "user", "content": "hi"}], tools=[]).model == "openai/gpt-oss-120b"
