@@ -7,7 +7,7 @@ Source letters: **A** Socrata airport-month T-100 · **B** TranStats T-100 Segme
 ## Headline
 - **Only B has route-level rows** (origin, dest, distance, scheduled/performed departures, class).
   Socrata (A) is airport × month only. B needs a manual download (steps in the README) –
-  2024 and 2025 are downloaded and verified; **2026 still missing** (see "T-100 Segment (B) verified").
+  2024, 2025 and 2026 (Jan–Aug) are downloaded and verified.
 - Everything else is scriptable today: A (API), C (form + link), D, E, F (direct).
 - Latest data: B and C → **Aug 2026**; A → **Jul 2026**; D → **CY2025**.
 
@@ -30,7 +30,7 @@ live ground stops / delays (F, context only).
 ## Other findings that affect design
 1. **Cargo at ANC.** A counts all-cargo departures (ANC is a major cargo hub), so departure-based metrics
    from A are misleading for ANC. For question 3 we need B filtered to passenger service.
-2. **Different windows.** B/C end Aug 2026, A ends Jul 2026, D is CY2025. Proposal: standard window
+2. **Different windows.** B/C end Aug 2026, A ends Jul 2026, D is CY2025. Agreed standard window:
    **Sep 2025–Aug 2026** (B + C). If B is unavailable, use **Aug 2025–Jul 2026** for A and C, and state it.
 3. **A and D agree.** 2025 passengers from A are within ±1% of FAA CY2025 enplanements for all 5 test airports,
    so A is a valid fallback for passengers/seats.
@@ -40,11 +40,15 @@ live ground stops / delays (F, context only).
    with a clear message and point to the manual fallback in data/raw/README.md.
 
 ## T-100 Segment (B) verified – 2026-11-18
-Files in `data/raw/t100_segment/` (git-ignored, ~19 MB zip / ~570k rows per year, all 50 form fields).
+Files in `data/raw/t100_segment/` (git-ignored, all 50 form fields, one zip per year):
 
-> ⚠️ **2026 is missing.** Two of the three zips are the same year (2025, identical 571,262 rows);
-> the third is 2024. Re-download **Year 2026, All Months** before the ETL. Until then the latest
-> full window in B is **CY2025**, not Sep 2025–Aug 2026.
+| Year | Rows | Months | Zip size |
+|---|---|---|---|
+| 2024 | 549,799 | 2024-01 .. 2024-12 | 18.5 MB |
+| 2025 | 571,262 | 2025-01 .. 2025-12 | 19.6 MB |
+| 2026 | 381,593 | 2026-01 .. 2026-08 | 13.4 MB |
+
+The standard window **Sep 2025 – Aug 2026** is fully covered, plus the prior 12 months for YoY.
 
 **Service class (`CLASS`)** – no term-definitions file was in the zip, so meanings are confirmed from
 the data pattern (consistent with BTS service-class definitions):
@@ -57,7 +61,6 @@ the data pattern (consistent with BTS service-class definitions):
 | P | Non-scheduled all-cargo | mostly freighter config; `DEPARTURES_SCHEDULED` always 0 |
 
 `AIRCRAFT_CONFIG`: 1 = passenger, 2 = freighter (≈0 seats), 3 = combi, 4 = seaplane (same evidence).
-**Passenger-service filter proposed:** `CLASS in (F, L)` and `AIRCRAFT_CONFIG != 2`.
 
 **Scheduled vs performed departures:** `DEPARTURES_SCHEDULED` is populated only for scheduled classes
 (F, G) **and only for US carriers**: foreign carriers (e.g. Air Canada, Volaris, Air France) report 0.
@@ -74,21 +77,28 @@ Naive gap for LAX = −18.6% (wrong); with `DEPARTURES_SCHEDULED > 0`:
 
 **Distance:** `DISTANCE` = segment distance in statute miles (2025: median 763, max 10,192); also `DISTANCE_GROUP`.
 
-**Months covered:** 2024-01..2024-12 and 2025-01..2025-12 (2026 missing, see above). Form says latest = Aug 2026.
+**Months covered:** 2024-01 .. 2026-08 (matches the form's "Latest Available Data: August 2026").
 
 ### ANC long-haul sanity check (`scripts/spike/anc_long_haul_check.py`)
-Passenger service only (CLASS F/L, not freighter). All-cargo/freighter departures = **54%** of all ANC
-departures and are excluded – this is why A (Socrata) alone would give a wrong answer for ANC.
+Window **Sep 2025 – Aug 2026** (12 months). Passenger service only (CLASS F/L, not freighter).
+All-cargo/freighter departures = **52.9%** of all ANC departures and are excluded – this is why
+A (Socrata) alone would give a wrong answer for ANC.
 
-| Threshold | CY2024 departures share | CY2024 seat-weighted | CY2025 departures share | CY2025 seat-weighted |
-|---|---|---|---|---|
-| ≥ 2,500 mi | 8.02% | 16.65% | 9.76% | 18.53% |
-| ≥ 3,000 mi | 2.34% | 5.11% | **2.78%** | 5.45% |
-| ≥ 4,000 mi | 0.21% | 0.60% | 0.29% | 0.71% |
+| Threshold | Departures share | Seat-weighted share | Long-haul departures |
+|---|---|---|---|
+| ≥ 2,500 mi | 9.50% | 18.30% | 3,818 |
+| **≥ 3,000 mi (default)** | **2.67%** | **5.17%** | 1,072 |
+| ≥ 4,000 mi | 0.13% | 0.21% | 54 |
 
-CY2025: 38,157 passenger departures. Top destinations ≥ 2,500 mi: MSP (2,519 mi), ORD (2,846), HNL (2,777),
-DFW (3,043), PHX (2,552). The 3,000 mi line sits between MSP/ORD and DFW, so the answer is **very
-sensitive to the threshold** (2.8% vs 9.8% at 2,500 mi) – the sensitivity table is essential in the answer.
+40,198 passenger departures performed. Top destinations ≥ 2,500 mi: MSP (2,519 mi), ORD (2,846),
+PHX (2,552), HNL (2,777), DFW (3,043), ATL (3,417), IAH (3,266), IAD (3,356) – all US domestic.
+The 3,000 mi line sits between MSP/ORD and DFW, so the answer is **very sensitive to the threshold**
+(2.7% vs 9.5% at 2,500 mi). Earlier calendar-year runs for comparison: CY2024 2.34%, CY2025 2.78% at 3,000 mi.
 
-## Open actions
-- **Re-download T-100 Segment 2026 (All Months)** – needed for the trailing-12 window Sep 2025–Aug 2026.
+## Agreed decisions (2026-11-18)
+1. **Passenger service** = `CLASS in (F, L)` and `AIRCRAFT_CONFIG != 2`.
+2. **Completion gap** = `1 − DEPARTURES_PERFORMED / DEPARTURES_SCHEDULED`, computed **only on rows with
+   `DEPARTURES_SCHEDULED > 0`** (in practice US carriers). Every answer that uses it must state this limitation.
+3. **Long-haul share** default threshold = **3,000 statute miles**, always shown with the
+   **2,500 / 4,000 mi sensitivity table** and **both departure-weighted and seat-weighted** shares.
+4. **Standard window** = trailing 12 months **Sep 2025 – Aug 2026** (B + C); stated in every answer.

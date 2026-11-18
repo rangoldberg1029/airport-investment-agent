@@ -41,17 +41,28 @@ def long_haul_table(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).round(2)
 
 
+WINDOW = ((2025, 9), (2026, 8))  # standard trailing-12-month window (inclusive)
+
+
+def in_window(df: pd.DataFrame) -> pd.Series:
+    ym = df.YEAR * 100 + df.MONTH
+    (y0, m0), (y1, m1) = WINDOW
+    return ym.between(y0 * 100 + m0, y1 * 100 + m1)
+
+
 if __name__ == "__main__":
     data = load_all()
+    data = data[in_window(data)]
+    months = sorted({(y, m) for y, m in zip(data.YEAR, data.MONTH)})
+    print(f"Window: {months[0]} .. {months[-1]} ({len(months)} months)")
+
     pax = data[(data.ORIGIN == AIRPORT) & data.CLASS.isin(["F", "L"]) & (data.AIRCRAFT_CONFIG != 2)]
-    for year, df in pax.groupby("YEAR"):
-        print(f"\n=== {AIRPORT} {year}: months {sorted(df.MONTH.unique())}, "
-              f"passenger departures performed = {int(df.DEPARTURES_PERFORMED.sum()):,}")
-        print(long_haul_table(df).to_string(index=False))
-        top = (df[df.DISTANCE >= THRESHOLDS_MI[0]]
-               .groupby(["DEST", "DEST_COUNTRY", "DISTANCE"]).DEPARTURES_PERFORMED.sum()
-               .sort_values(ascending=False).head(8))
-        print(f"Top destinations >= {THRESHOLDS_MI[0]} mi:\n{top.to_string()}")
+    print(f"\n=== {AIRPORT} passenger departures performed = {int(pax.DEPARTURES_PERFORMED.sum()):,}")
+    print(long_haul_table(pax).to_string(index=False))
+    top = (pax[pax.DISTANCE >= THRESHOLDS_MI[0]]
+           .groupby(["DEST", "DEST_COUNTRY", "DISTANCE"]).DEPARTURES_PERFORMED.sum()
+           .sort_values(ascending=False).head(8))
+    print(f"Top destinations >= {THRESHOLDS_MI[0]} mi:\n{top.to_string()}")
 
     all_anc = data[data.ORIGIN == AIRPORT]
     cargo_share = 100 * (1 - pax.DEPARTURES_PERFORMED.sum() / all_anc.DEPARTURES_PERFORMED.sum())
