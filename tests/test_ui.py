@@ -75,6 +75,44 @@ def test_charts_build(records, name):
     assert "'tickCount': 5" in text
 
 
+CODE_NAME_RE = r"\b[a-z]+_[a-z_]+\b|\b[a-z]+[A-Z][a-zA-Z]+\b"     # snake_case or camelCase identifiers
+
+
+@pytest.fixture
+def live_record(frames):
+    from agent.tools import live_airport_status
+
+    def feed():
+        return [{"airportId": "AAA", "groundStop": {"impactingCondition": "wind",
+                                                    "programExpirationTime": "2026-11-18T20:00:00Z"},
+                 "airportConfig": {"arrivalRunwayConfig": "28L (.308)", "arrivalRate": 36}}], "stamp"
+    return execute_tool("live_airport_status", {"airport": "AAA"}, frames,
+                        {"live_airport_status": lambda f, airport: live_airport_status(f, airport, fetch=feed)})
+
+
+def test_evidence_tables_and_charts_have_no_code_names(records, live_record):
+    import re
+    for record in [*records.values(), live_record]:
+        for title, df in evidence.tables(record):
+            texts = [title, *map(str, df.columns), *df.astype(str).values.ravel()]
+            bad = sorted({m for t in texts for m in re.findall(CODE_NAME_RE, t)})
+            assert not bad, (record.name, title, bad)
+        ch = evidence.chart(record)
+        if ch is not None:
+            values = ch.to_dict()
+            data = values.get("datasets", {})
+            shown = [str(row.get(k)) for rows in data.values() for row in rows for k in ("component", "measure")
+                     if row.get(k) is not None]
+            assert not [s for s in shown if re.search(CODE_NAME_RE, s)], (record.name, shown)
+
+
+def test_live_evidence_shows_readable_event_lines(live_record):
+    (title, df), = evidence.tables(live_record)
+    assert list(df.columns) == ["event"]
+    assert df["event"].iloc[0].startswith("Ground stop until 20:00 UTC")
+    assert "(.308)" not in " ".join(df["event"])
+
+
 def test_no_chart_for_profile_or_errors(records, frames):
     assert evidence.chart(records["get_airport_profile"]) is None
     assert evidence.chart(execute_tool("unmet_demand", {"airport": "Atlantis"}, frames)) is None

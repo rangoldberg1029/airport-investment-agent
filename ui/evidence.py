@@ -1,7 +1,5 @@
 """Evidence: turn a tool envelope into tables (DataFrames) and one Altair chart. Pure functions."""
 
-import json
-
 import altair as alt
 import pandas as pd
 
@@ -9,6 +7,19 @@ from agent.tools import ToolCallRecord
 from ui.key_facts import label
 
 Table = tuple[str, pd.DataFrame]
+
+# Readable row labels (with units) for metrics shown side by side.
+METRIC_LABELS = {
+    "congestion_index": "Congestion index (0-100)", "delay_rate": "Arrival delay rate %",
+    "nas_share": "NAS share of delay minutes %", "cancellation_rate": "Cancellation rate %",
+    "operations_per_runway": "Operations per commercial runway", "commercial_runways": "Commercial runways",
+    "load_factor_avg": "Load factor (average)", "passengers": "Passengers",
+}
+
+
+def _weights_text(weights: dict) -> str:
+    """{'demand_pressure': 0.35, ...} -> 'demand pressure 35%, growth 25%, ...'."""
+    return ", ".join(f"{k.replace('_', ' ')} {v:.0%}" for k, v in weights.items())
 
 
 def _components_long(rows: list[dict], label_key: str = "airport") -> pd.DataFrame:
@@ -35,7 +46,7 @@ def tables_rank(d: dict) -> list[Table]:
                    _components_long(ranking["ranking"])))
     stab = d["stability"]
     tables.append(("Rank stability: top 3 per weight preset",
-                   pd.DataFrame([{"preset": k, "weights": json.dumps(stab["presets"][k]), "top 3": ", ".join(v)}
+                   pd.DataFrame([{"preset": k, "weights": _weights_text(stab["presets"][k]), "top 3": ", ".join(v)}
                                  for k, v in stab["rankings"].items()])))
     if ranking["outside_ranking_universe"]:
         tables.append(("Outside the ranking universe (FAA non-hubs)", pd.DataFrame(ranking["outside_ranking_universe"])))
@@ -43,9 +54,10 @@ def tables_rank(d: dict) -> list[Table]:
 
 
 def tables_compare(d: dict) -> list[Table]:
-    raw = pd.DataFrame(d["raw_values"])
-    raw.index.name = "airport"
-    return [("Metrics side by side", raw.T.reset_index().rename(columns={"index": "metric"})),
+    raw = pd.DataFrame(d["raw_values"])            # rows = airports, columns = metrics
+    side = raw.T.reset_index().rename(columns={"index": "metric"})
+    side["metric"] = side["metric"].map(lambda m: METRIC_LABELS.get(m, m.replace("_", " ")))
+    return [("Metrics side by side", side),
             ("Congestion index components", _components_long(d["congestion"]["airports"]))]
 
 
@@ -53,8 +65,10 @@ def tables_long_haul(d: dict) -> list[Table]:
     sens = pd.DataFrame(d["sensitivity"]).rename(columns={
         "threshold_mi": "threshold (mi)", "departure_share_pct": "departures %", "seat_share_pct": "seats %"})
     key = next(k for k in d if k.startswith("top_routes"))
+    routes = pd.DataFrame(d[key]).rename(columns={"dest": "destination", "dest_country": "country",
+                                                  "distance_mi": "distance (mi)"})
     return [("Long-haul share by distance threshold", sens),
-            (f"Top routes >= {d['default_threshold_mi']:,} mi", pd.DataFrame(d[key]))]
+            (f"Top routes >= {d['default_threshold_mi']:,} mi", routes)]
 
 
 def tables_unmet(d: dict) -> list[Table]:
@@ -69,13 +83,13 @@ def tables_unmet(d: dict) -> list[Table]:
     for target, entry in u["capacity_gap"].items():
         for period in ("window", "peak_month"):
             g = entry[period]
-            gaps.append({"target LF": g["target_load_factor"],
+            gaps.append({"target load factor": g["target_load_factor"],
                          "period": "12-month window" if period == "window" else f"peak month {g['month']}",
-                         "current LF": g["current_load_factor"], "extra seats": g["extra_seats"],
+                         "current load factor": g["current_load_factor"], "extra seats": g["extra_seats"],
                          "extra seats %": g["extra_seats_pct"], "extra departures": g["extra_departures"]})
     dp = d["delay_profile"]
     vs = pd.DataFrame([
-        {"metric": m, u["airport"]: dp[f"{m}_pct"], "national": dp["national"][f"{m}_pct"],
+        {"metric": label(m), u["airport"]: dp[f"{m}_pct"], "national": dp["national"][f"{m}_pct"],
          "hub peer median": dp["hub_peer_median"][f"{m}_pct"]}
         for m in ("delay_rate", "nas_share", "cancellation_rate")])
     tables = [("Unmet-demand components", comps)]
@@ -101,7 +115,9 @@ def tables_profile(d: dict) -> list[Table]:
 
 
 def tables_live(d: dict) -> list[Table]:
-    return [("Active FAA events", pd.DataFrame(d.get("events") or [{"status": d.get("status")}]))]
+    """Readable event lines (decoded reasons, UTC + local times), not the feed's raw field names."""
+    lines = d.get("event_descriptions") or [d.get("status") or "No active FAA delay events reported right now"]
+    return [("Active FAA events", pd.DataFrame({"event": lines}))]
 
 
 TABLES = {"rank_airports": tables_rank, "compare_congestion": tables_compare, "long_haul_share": tables_long_haul,

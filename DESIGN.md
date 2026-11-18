@@ -188,7 +188,7 @@ Response times (`scripts/measure_fast_path.py`, the 4 example questions):
 | Typed question | avg 3.0 s | avg 4.7 s | avg 7.7 s |
 
 Full per-turn details and all answers are in `docs/eval/eval_results.md`; the model comparison is in
-`docs/eval/model_comparison.md`. The code has 263 offline unit and app tests (fake LLMs, no network); they run in
+`docs/eval/model_comparison.md`. The code has 265 offline unit and app tests (fake LLMs, no network); they run in
 CI on every push.
 
 ## 7. Key tradeoffs
