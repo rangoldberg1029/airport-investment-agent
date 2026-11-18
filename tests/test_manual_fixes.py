@@ -274,6 +274,69 @@ def test_stream_reports_finish_reason():
     assert resp.finish_reason == "length" and stub.calls[0]["max_tokens"] == 2000
 
 
+# ---------------------------------------------------------------- Gemini first-token timeout
+
+class _SlowStub:
+    """create() waits `delays[i]` seconds before the response; a stream yields its chunks with `gap` seconds
+    between them."""
+
+    def __init__(self, delays, chunks=("ok",), gap=0.0):
+        import time
+        self.delays, self.calls, outer = list(delays), 0, self
+
+        class _Raw:
+            def create(self, **kwargs):
+                outer.calls += 1
+                time.sleep(outer.delays.pop(0))
+
+                def stream():
+                    for i, piece in enumerate(chunks):
+                        if i:
+                            time.sleep(gap)
+                        yield _Chunk(piece)
+                return type("R", (), {"headers": {}, "parse": lambda self: stream()})()
+        self.chat = type("Chat", (), {"completions": type("Comp", (), {"with_raw_response": _Raw()})()})()
+
+
+def _timed_gemini(stub, limit=0.2):
+    from agent.llm import DEFAULT_GEMINI_MODEL, GEMINI_BASE_URL
+    return make_provider("gemini", DEFAULT_GEMINI_MODEL, GEMINI_BASE_URL, client=stub, first_token_timeout=limit)
+
+
+def test_no_first_token_in_time_retries_then_uses_groq():
+    from tests.test_llm import _raw, groq, _Seq
+    slow, sleeps = _SlowStub([1.0, 1.0]), []
+    q = _Seq([_raw("from groq")])
+    client = OpenAIChat(_timed_gemini(slow), groq(q), sleep=sleeps.append)
+    client.start_turn()
+    resp = client.complete([{"role": "user", "content": "hi"}], [])
+    assert resp.model == "openai/gpt-oss-120b" and slow.calls == 2 and sleeps == [2.0]
+    assert client.switch_reason == "gemini timeout (no first token within 0.2 s), after 1 retry"
+
+
+def test_slow_first_attempt_then_fast_retry_stays_on_gemini():
+    slow = _SlowStub([1.0, 0.0])
+    client = OpenAIChat(_timed_gemini(slow), sleep=lambda s: None)
+    pieces = []
+    resp = client.complete([{"role": "user", "content": "hi"}], [], "none", on_token=pieces.append)
+    assert resp.content == "ok" and slow.calls == 2
+
+
+def test_long_stream_after_the_first_token_is_never_cut():
+    """First token fast, then gaps and a total far beyond the first-token limit: the answer completes."""
+    slow = _SlowStub([0.0], chunks=("- one", " two", " three."), gap=0.3)
+    pieces = []
+    resp = OpenAIChat(_timed_gemini(slow, limit=0.2), sleep=lambda s: None).complete(
+        [{"role": "user", "content": "hi"}], [], "none", on_token=pieces.append)
+    assert resp.content == "- one two three." and pieces == ["- one", " two", " three."] and slow.calls == 1
+
+
+def test_gemini_provider_has_the_8_second_first_token_limit():
+    from agent.llm import gemini_provider, groq_provider
+    assert gemini_provider("key").first_token_timeout == 8.0
+    assert groq_provider("key").first_token_timeout is None
+
+
 # ---------------------------------------------------------------- F20 voice vocabulary
 
 def test_whisper_prompt_has_domain_vocabulary():

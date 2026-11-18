@@ -26,7 +26,7 @@ Base URLs, reasoning levels, limits and timeouts are constants in `agent/llm.py`
 | Gemini result | Action |
 |---|---|
 | HTTP 429 (per-minute or daily limit) | Groq immediately |
-| HTTP 5xx, timeout (20 s) or connection error | Retry Gemini once after 2 s; if it fails again, Groq |
+| HTTP 5xx, connection error, or no first token within 8 s (a stream that has started is never cut) | Retry Gemini once after 2 s; if it fails again, Groq |
 | Would wait > 5 s for its own rate limit | Groq |
 | Other errors (e.g. HTTP 400) | Shown as an error (Groq would fail the same way) |
 

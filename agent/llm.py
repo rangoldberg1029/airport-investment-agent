@@ -12,14 +12,18 @@ Error policy (per LLM call):
   Gemini 429 (per-minute or daily limit)        -> Groq immediately
   Gemini 5xx, timeout or connection error       -> retry Gemini once after SERVER_RETRY_DELAY_S -> then Groq
   Gemini would wait > FALLBACK_AFTER_S for its rate limit                  -> Groq
+Timeout = no first token (non-streamed call: no response) within GEMINI_FIRST_TOKEN_TIMEOUT_S; a stream that
+has started is never cut by time.
 Once a turn has switched to Groq it stays there for the rest of that turn. Without Groq, 429s are retried
 with backoff and a 5xx/timeout is retried once; then the turn shows an error.
 """
 
+import itertools
 import json
 import os
 import random
 import re
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -33,7 +37,11 @@ GEMINI_REASONING = "minimal"        # lowest Gemini 3 thinking level
 GROQ_REASONING = "low"              # gpt-oss reasoning effort
 GEMINI_TPM, GEMINI_RPM = 250_000, 15     # free-tier limits, paced locally (Gemini sends no rate-limit headers)
 GROQ_TPM = 8_000                    # replaced by Groq's x-ratelimit-limit-tokens header after the first call
-GEMINI_TIMEOUT_S, GROQ_TIMEOUT_S = 20.0, 60.0
+# Gemini: a call must deliver its FIRST token (non-streamed: its response) within 8 s, else it counts as a timeout
+# (one retry, then Groq). Once streaming has started there is no total limit; HTTP_TIMEOUT_S only bounds a
+# stalled connection (connect / gap between chunks).
+GEMINI_FIRST_TOKEN_TIMEOUT_S = 8.0
+HTTP_TIMEOUT_S = 60.0
 SERVER_RETRY_DELAY_S = 2.0          # wait before the one retry after a 5xx / timeout
 FALLBACK_AFTER_S = 5.0              # switch instead of waiting longer than this for the primary's rate limit
 MAX_OUTPUT_TOKENS = 1000            # per call, incl. hidden reasoning tokens (eval answers <= ~600)
@@ -118,6 +126,31 @@ def with_server_retry(fn: Callable[[], Any], sleep: Callable[[float], None] = ti
         return fn()
 
 
+class FirstTokenTimeout(TimeoutError):
+    """No first token (or, for a non-streamed call, no response) within the provider's first-token limit."""
+
+
+def run_with_deadline(fn: Callable[[], Any], seconds: float) -> Any:
+    """Run fn in a worker thread and return its result, or raise FirstTokenTimeout after `seconds`.
+    A timed-out worker is left to finish on its own (daemon thread, bounded by the HTTP read timeout)."""
+    outcome: dict = {}
+    done = threading.Event()
+
+    def target() -> None:
+        try:
+            outcome["value"] = fn()
+        except BaseException as exc:          # handed to the caller below
+            outcome["error"] = exc
+        finally:
+            done.set()
+    threading.Thread(target=target, daemon=True).start()
+    if not done.wait(seconds):
+        raise FirstTokenTimeout(f"no first token within {seconds:g} s")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
 def unavailable_reason(exc: Exception) -> str | None:
     """Why a provider could not answer, if switching to the fallback can help: rate limit, server error (5xx),
     timeout or connection failure. None for errors the fallback would hit too (e.g. 400 bad request)."""
@@ -127,6 +160,8 @@ def unavailable_reason(exc: Exception) -> str | None:
     if isinstance(status, int) and status >= 500:
         return f"server error (HTTP {status})"
     name = type(exc).__name__
+    if isinstance(exc, FirstTokenTimeout):
+        return f"timeout ({exc})"
     if isinstance(exc, TimeoutError) or name == "APITimeoutError":
         return "timeout"
     if isinstance(exc, ConnectionError) or name == "APIConnectionError":
@@ -318,6 +353,7 @@ class Provider:
     effort: str | None            # reasoning effort sent with each call (None = not sent)
     pacer: TpmPacer
     stream_usage: bool = True     # ask for token usage in streamed answers (dropped if the provider rejects it)
+    first_token_timeout: float | None = None   # seconds to the first token / response (None = no such limit)
 
     @property
     def is_gemini(self) -> bool:
@@ -332,24 +368,26 @@ def _effort_for(model: str, effort: str | None) -> str | None:
 def make_provider(name: str, model: str, base_url: str, api_key: str | None = None, effort: str | None = None,
                   tpm_limit: int = GROQ_TPM, rpm_limit: int | None = None,
                   sleep: Callable[[float], None] = time.sleep, client: Any = None,
-                  timeout_s: float = GROQ_TIMEOUT_S) -> Provider:
+                  first_token_timeout: float | None = None) -> Provider:
     if client is None:
         from openai import OpenAI
 
         client = OpenAI(api_key=api_key or "not-set", base_url=base_url, max_retries=0,   # retries handled here
-                        timeout=timeout_s)
+                        timeout=HTTP_TIMEOUT_S)
     return Provider(name, model, base_url, client, _effort_for(model, effort),
-                    TpmPacer(limit=tpm_limit, rpm_limit=rpm_limit, sleep=sleep))
+                    TpmPacer(limit=tpm_limit, rpm_limit=rpm_limit, sleep=sleep),
+                    first_token_timeout=first_token_timeout)
 
 
 def gemini_provider(api_key: str, model: str | None = None, **kw) -> Provider:
+    kw.setdefault("first_token_timeout", GEMINI_FIRST_TOKEN_TIMEOUT_S)
     return make_provider("gemini", model or DEFAULT_GEMINI_MODEL, GEMINI_BASE_URL, api_key, GEMINI_REASONING,
-                         tpm_limit=GEMINI_TPM, rpm_limit=GEMINI_RPM, timeout_s=GEMINI_TIMEOUT_S, **kw)
+                         tpm_limit=GEMINI_TPM, rpm_limit=GEMINI_RPM, **kw)
 
 
 def groq_provider(api_key: str, model: str | None = None, **kw) -> Provider:
     return make_provider("groq", model or DEFAULT_GROQ_MODEL, GROQ_BASE_URL, api_key, GROQ_REASONING,
-                         tpm_limit=GROQ_TPM, timeout_s=GROQ_TIMEOUT_S, **kw)
+                         tpm_limit=GROQ_TPM, **kw)
 
 
 def providers_from_env(sleep: Callable[[float], None] = time.sleep) -> tuple[Provider | None, Provider | None]:
@@ -500,6 +538,22 @@ class OpenAIChat:
                         return create(**kwargs)
             raise
 
+    def _fetch(self, provider: Provider, kwargs: dict, stream: bool) -> tuple[Any, Any]:
+        """Send one request and return (response headers, parsed completion) - when streaming, an iterator whose
+        first chunk has already arrived. With a first-token limit (Gemini), only the wait for that FIRST chunk
+        is timed; the rest of a stream is read without a total limit, so long answers are never cut."""
+        def first_chunk():
+            raw = self._request(provider, kwargs)
+            parsed = raw.parse()
+            if stream:
+                chunks = iter(parsed)
+                first = next(chunks, None)
+                parsed = itertools.chain([first], chunks) if first is not None else iter(())
+            return raw.headers, parsed
+        if not provider.first_token_timeout:
+            return first_chunk()
+        return run_with_deadline(first_chunk, provider.first_token_timeout)
+
     def _call(self, provider: Provider, messages: list[dict], tools: list[dict], tool_choice: str,
               estimate: int, on_token: Callable[[str], None] | None = None) -> LLMResponse:
         provider.pacer.wait_for(estimate)
@@ -508,7 +562,7 @@ class OpenAIChat:
             kwargs["stream"] = True
             if provider.stream_usage:
                 kwargs["stream_options"] = {"include_usage": True}
-        request = lambda: self._request(provider, kwargs)  # noqa: E731
+        request = lambda: self._fetch(provider, kwargs, stream=on_token is not None)  # noqa: E731
         if provider is self.primary and self.fallback and self.fallback.model not in self.exhausted:
             # Primary with a usable fallback: 429 -> switch now; 5xx/timeout -> one retry, then switch.
             server_errors = 0
@@ -531,11 +585,12 @@ class OpenAIChat:
         else:
             # No fallback (or this is the fallback): 429 -> backoff retries; 5xx/timeout -> one retry.
             raw = with_retry(lambda: with_server_retry(request, self.sleep), sleep=self.sleep)
-        self._observe(provider, raw.headers)
+        headers, parsed = raw
+        self._observe(provider, headers)
         if on_token is not None:
-            content, calls, usage, finish = self._read_stream(raw.parse(), on_token)
+            content, calls, usage, finish = self._read_stream(parsed, on_token)
         else:
-            resp = raw.parse()
+            resp = parsed
             usage, msg = resp.usage, resp.choices[0].message
             finish = getattr(resp.choices[0], "finish_reason", None) or "stop"
             content = msg.content or ""

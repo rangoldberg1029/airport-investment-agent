@@ -206,7 +206,7 @@ One line of reasoning per decision. Values live in `scoring/config.py`; change t
   the bullets with the retried version. A bullet cut off mid-sentence (output limit / stream ended) is dropped.
 - **Memory = last 6 exchanges as text; earlier tool outputs are not resent.** Each earlier answer carries a
   one-line summary of its tool calls; answers older than the latest are truncated to 300 characters. Prompt
-  size stays flat as a conversation grows (eval: turn 1 4,256 tokens, turn 5 4,882).
+  size stays flat as a conversation grows (eval: turn 1 4,281 tokens, turn 5 4,626).
 - **Lowest reasoning level that works (Gemini `minimal`, Groq `low`); max output 2,000 tokens for Gemini
   (its thinking counts toward the limit), 1,000 for Groq.** Fewer hidden tokens, same eval quality.
 - **Pacing from the provider's rate-limit headers when sent (Groq; cached tokens don't count), else a local
@@ -248,7 +248,8 @@ One line of reasoning per decision. Values live in `scoring/config.py`; change t
   failover to `openai/gpt-oss-120b`; without it, everything except voice works, with no failover (sidebar:
   "Voice input requires GROQ_API_KEY"). Only `GROQ_API_KEY` set → the app runs on Groq alone. Neither → the
   setup card.
-- **Error policy:** Gemini 429 → Groq immediately; Gemini 5xx, timeout (20 s) or connection error → one retry
+- **Error policy:** Gemini 429 → Groq immediately; Gemini 5xx, timeout (no first token within 8 s; a stream
+  that has started is never cut) or connection error → one retry
   after 2 s, then Groq; Gemini would wait > 5 s for its rate limit → Groq. Once on Groq, the rest of the turn
   stays there. The "Done" line names the model that answered (and the failover reason). Free-tier servers do
   return 5xx (seen in the evals), so one retry recovers most of them without switching models.
@@ -267,7 +268,7 @@ One line of reasoning per decision. Values live in `scoring/config.py`; change t
   answer has no error, needed no retry and passed every check. The demo questions answer instantly without
   spending quota.
 - **Progressive answers.** Answer line, Key facts and Evidence appear as soon as the tool ran (card click
-  ~0.03-0.2 s; typed question ~1 s); the status line says "Facts ready · writing explanation…" and a small
+  under 0.2 s; typed question typically 1-2 s); the status line says "Facts ready · writing explanation…" and a small
   spinner sits where the bullets will appear; the bullets then stream in.
 - **Each element is rendered once.** Every answer uses one fixed frame of slots (status, Answer, Why / drivers,
   Key facts + Evidence, follow-ups) live and in history, so a rerun replaces elements in place. The welcome
