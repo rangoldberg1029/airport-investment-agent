@@ -19,9 +19,10 @@ def test_profile_bundles_kpis_and_precomputed_differences(frames):
     r = execute_tool("get_airport_profile", {"airport": "AAA"}, frames)
     d = view(r)["data"]
     assert r.error is None and d["airport"] == "AAA"
-    assert d["delay_rate_pct"] == 20.0
-    assert d["delay_rate_minus_national_pp"] == round(20.0 - d["national"]["delay_rate_pct"], 2)
-    assert d["commercial_runways"] == 2 and d["investment_score"] is not None
+    assert d["delay_rate"] == "20.0%" and d["national"]["delay_rate"] == "16.25%"   # (20+10+30+5)/400
+    assert d["delay_rate_minus_national"] == "+3.75 pp"
+    assert d["load_factor_avg"].endswith(" LF") and d["growth_yoy"].endswith("%")
+    assert d["commercial_runways"] == "2 runways" and d["investment_score"].endswith("/ 100")
     assert set(r.envelope) == {"data", "sources", "data_period", "assumptions", "caveats"}
 
 
@@ -29,11 +30,12 @@ def test_compare_congestion_has_differences_for_every_metric(frames):
     r = execute_tool("compare_congestion", {"airports": ["AAA", "BBB"]}, frames)
     d = view(r)["data"]
     diffs = d["differences"]["AAA_minus_BBB"]
-    v = d["values"]
-    assert diffs["delay_rate_pct"] == [round(v["delay_rate_pct"]["AAA"] - v["delay_rate_pct"]["BBB"], 3), "pp"]
-    assert diffs["commercial_runways"][0] == 2 - 4
-    assert set(d["contribution_differences"]["AAA_minus_BBB"]) == {"delay_rate", "nas_share", "ops_per_runway",
-                                                                   "cancellation_rate"}
+    assert d["values"]["delay_rate"] == {"AAA": "20.0%", "BBB": "10.0%"}
+    assert diffs["delay_rate"] == "+10.0 pp" and diffs["commercial_runways"] == "-2 runways"
+    assert all(v.startswith(("+", "-", "0")) for v in diffs.values())        # every difference is signed
+    drivers = d["drivers_of_index_difference"]["AAA_vs_BBB"]
+    assert len(drivers["ranked"]) == 4 and "raises" in drivers["ranked"][0]
+    assert "Largest single driver" in drivers["summary"]
     assert d["runway_lengths_ft_excluded_short"]["AAA"] == [2500]
 
 
@@ -70,13 +72,16 @@ def test_bad_arguments_and_unknown_tool(frames):
 
 def test_long_haul_custom_threshold(frames):
     d = view(execute_tool("long_haul_share", {"airport": "AAA", "threshold_mi": 4000}, frames))["data"]
-    assert d["threshold_mi"] == 4000 and d["departure_share_pct"] == round(100 * 12 / 156, 2)
+    assert d["threshold"] == "4,000 mi" and d["departure_share"] == f"{round(100 * 12 / 156, 2)}%"
 
 
 def test_unmet_demand_drivers_include_difference_to_median(frames):
     d = view(execute_tool("unmet_demand", {"airport": "AAA"}, frames))["data"]
-    for comp, value, median, delta, _ in d["drivers"]:
-        assert delta == round(value - median, 3)
+    assert d["drivers_above_peer_median"]
+    for comp, value, median, delta, _ in d["drivers_above_peer_median"]:
+        assert delta.startswith("+")                         # drivers are above the median
+    assert "independent of load factor" in d["component_meanings"]["completion_gap"]
+    assert "do not cause" in d["note"]
     assert set(d["capacity_gap"]) == {"target_0.85", "target_0.80"}
     entry = d["capacity_gap"]["target_0.85"]
     assert set(entry) == {"window_12_months", "peak_month", "interpretation"}
@@ -85,7 +90,7 @@ def test_unmet_demand_drivers_include_difference_to_median(frames):
 
 def test_percentiles_have_one_decimal(frames):
     d = view(execute_tool("unmet_demand", {"airport": "AAA"}, frames))["data"]
-    pctiles = [row[2] for row in d["components"]] + [row[4] for row in d["drivers"]]
+    pctiles = [row[2] for row in d["components"]] + [row[4] for row in d["drivers_above_peer_median"]]
     assert all(p == round(p, 1) for p in pctiles) and any(p != round(p) for p in pctiles)
 
 
@@ -139,7 +144,7 @@ def test_shorten_keeps_unknown_and_resolution_texts():
 ])
 def test_llm_view_size_cap(frames, name, args):
     r = execute_tool(name, args, frames)
-    cap = 1100 if name == "explain_methodology" else 700          # tokens (~4 chars each)
+    cap = 1100 if name == "explain_methodology" else 900          # tokens (~4 chars); units + meanings included
     assert len(r.llm_view) / 4 <= cap, f"{name} view too large: {len(r.llm_view) // 4} tokens"
 
 

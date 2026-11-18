@@ -18,6 +18,11 @@ def test_extract_formats():
     assert values("−1.9%") == [(-1.9, 1, True)]
 
 
+def test_ordinals_and_decimals_are_parsed_whole():
+    assert values("63.7th percentile, 99th, 2nd") == [(63.7, 1, False), (99, 0, False), (2, 0, False)]
+    assert untraceable_numbers("peak LF at the 63.7th percentile", [{"pctile": 63.7}]) == []
+
+
 def test_codes_and_identifiers_are_not_numbers():
     assert values("runway 07L/25R, BTS T-100, CY2025, r495-tyji, Q1") == []
 

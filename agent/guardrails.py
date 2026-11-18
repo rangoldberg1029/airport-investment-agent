@@ -16,9 +16,10 @@ NUMBER_RE = re.compile(
     r"(?<![\w.\-/])"                                  # not part of a word, code or range like T-100, 07L/25R
     r"([+\-−]?)"                                 # sign (incl. unicode minus)
     r"(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?"           # 1,234,567 | 1234 | 12.5
+    r"(?:st|nd|rd|th)?"                               # ordinals: 63.7th percentile
     r"(?:\s?(%|pp\b|percentage points?))?"            # percent markers
     r"(?:\s?(million|billion|thousand|[MBK]\b|k\b))?" # scale words
-    r"(?![\w])",
+    r"(?![\w]|\.\d)",                                 # never stop in the middle of "63.7"
     re.IGNORECASE,
 )
 SCALE = {"million": 1e6, "m": 1e6, "billion": 1e9, "b": 1e9, "thousand": 1e3, "k": 1e3}

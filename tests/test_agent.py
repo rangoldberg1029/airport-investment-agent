@@ -38,7 +38,7 @@ def test_tool_then_answer(frames):
     assert result.untraceable_numbers == [] and result.llm_calls == 2 and result.total_tokens == 150
     tool_msg = fake.seen[1][-1]
     assert tool_msg["role"] == "tool" and tool_msg["tool_call_id"] == "c1"
-    assert '"departure_share_pct":23.08' in tool_msg["content"]
+    assert '"departure_share":"23.08%"' in tool_msg["content"]
 
 
 def test_two_tools_in_one_turn(frames):
@@ -103,6 +103,29 @@ def test_number_check_flags_invented_numbers(frames):
     fake = FakeLLM([call("long_haul_share", {"airport": "AAA"}), text("Share is 23.08%, up from 19.4% last year.")])
     result = Agent(fake, frames).ask("long haul?")
     assert [n["value"] for n in result.untraceable_numbers] == ["19.4%"]
+
+
+class QuotingLLM:
+    """First call: request compare_congestion. Second call: quote numbers that exist ONLY in the
+    compact LLM view (precomputed difference + net contribution difference)."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def complete(self, messages, tools, tool_choice="auto"):
+        self.calls += 1
+        if self.calls == 1:
+            return call("compare_congestion", {"airports": ["AAA", "BBB"]})
+        view = json.loads(messages[-1]["content"])["data"]
+        delay_diff = view["differences"]["AAA_minus_BBB"]["delay_rate"]
+        net = view["drivers_of_index_difference"]["AAA_vs_BBB"]["net_difference"]
+        return text(f"AAA minus BBB: delay rate {delay_diff}, net contribution difference {net}.")
+
+
+def test_number_check_accepts_precomputed_differences_from_llm_view(frames):
+    result = Agent(QuotingLLM(), frames).ask("compare AAA and BBB")
+    assert "net contribution difference" in result.text
+    assert result.untraceable_numbers == []
 
 
 def test_number_check_uses_earlier_turns(frames):

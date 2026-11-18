@@ -66,6 +66,44 @@ def test_pacer_waits_until_window_has_room():
     assert sleeps
 
 
+class _Stub:
+    """Minimal stand-in for openai's client.chat.completions.with_raw_response.create(...)."""
+
+    def __init__(self, headers):
+        msg = type("M", (), {"content": "hello", "tool_calls": None})()
+        usage = type("U", (), {"total_tokens": 120, "prompt_tokens": 100, "completion_tokens": 20})()
+        parsed = type("C", (), {"choices": [type("Ch", (), {"message": msg})()], "usage": usage})()
+        raw = type("R", (), {"headers": headers, "parse": lambda self: parsed})()
+        self.kwargs = None
+        outer = self
+
+        class _Raw:
+            def create(self, **kwargs):
+                outer.kwargs = kwargs
+                return raw
+        self.chat = type("Chat", (), {"completions": type("Comp", (), {"with_raw_response": _Raw()})()})()
+
+
+def test_openai_chat_complete_reads_limit_header_and_usage(monkeypatch):
+    from agent.llm import OpenAIChat
+    monkeypatch.delenv("LLM_TPM_LIMIT", raising=False)
+    client = OpenAIChat(api_key="test", model="openai/gpt-oss-120b", reasoning_effort="low")
+    client.client = _Stub({"x-ratelimit-limit-tokens": "12000"})
+    resp = client.complete([{"role": "user", "content": "hi"}], tools=[])
+    assert resp.content == "hello" and resp.total_tokens == 120
+    assert client.pacer.limit == 12000 and client.pacer.used() == 120
+    assert client.client.kwargs["reasoning_effort"] == "low"
+    assert client.client.kwargs["max_completion_tokens"] == client.max_output_tokens
+
+
+def test_reasoning_effort_not_sent_to_other_models(monkeypatch):
+    from agent.llm import OpenAIChat
+    client = OpenAIChat(api_key="test", model="qwen/qwen3.8-27b", reasoning_effort="low")
+    client.client = _Stub({})
+    client.complete([{"role": "user", "content": "hi"}], tools=[])
+    assert "reasoning_effort" not in client.client.kwargs and client.pacer.limit == 8000
+
+
 def test_pacer_window_expiry():
     now = [0.0]
     pacer = TpmPacer(limit=1000, window=60, clock=lambda: now[0], sleep=lambda s: None)

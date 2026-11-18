@@ -88,7 +88,9 @@ class Agent:
 
         turn.answer = answer.strip() or "I could not produce an answer. Please rephrase the question."
         self.turns.append(turn)
-        everything = [r.envelope for t in self.turns for r in t.records]
+        # Both what the scoring layer returned (envelope) and what the LLM actually saw (llm_view: precomputed
+        # differences and ranked drivers live only there) count as traceable sources.
+        everything = [x for t in self.turns for r in t.records for x in (r.envelope, r.llm_view)]
         check = untraceable_numbers(turn.answer, everything, user_text=text)
         return TurnResult(turn.answer, turn.records, check, tokens, calls)
 

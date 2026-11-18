@@ -117,18 +117,86 @@ def compact(env: dict, view_data: dict) -> str:
     return json.dumps(view, separators=(",", ":"), ensure_ascii=False)
 
 
+# Units attached to every value the LLM sees, so it cannot drop or confuse them.
+UNITS = {
+    "lf_avg": "LF", "lf_peak": "LF", "demand_pressure": "LF", "load_factor_avg": "LF", "load_factor_peak": "LF",
+    "growth_yoy": "%", "growth": "%", "delay_rate": "%", "nas_share": "%", "cancellation_rate": "%",
+    "completion_gap": "%", "delay_rate_pct": "%", "nas_share_pct": "%", "cancellation_rate_pct": "%",
+    "ops_per_runway": "ops/runway/yr", "operations_per_runway": "ops/runway/yr",
+    "scale": "passengers", "passengers": "passengers", "congestion": "index", "congestion_index": "index",
+    "commercial_runways": "runways",
+}
+DIFF_UNITS = {"%": "pp", "index": "index pts"}
+SIGNED_UNITS = ("pp", "index pts", "pts")
+
+
+def u(value, unit: str, signed: bool = False):
+    """Value with its unit as a string: 18.7 -> '18.7%', 0.817 -> '0.817 LF', 133594 -> '133,594 ops/runway/yr'.
+    Differences ('pp', 'pts', or signed=True) always carry an explicit sign."""
+    if value is None or (isinstance(value, float) and value != value):
+        return None
+    sign = "+" if (signed or unit in SIGNED_UNITS) and value > 0 else ""
+    if unit == "%":
+        return f"{sign}{value}%"
+    if isinstance(value, (int, float)) and abs(value) >= 1000:
+        return f"{sign}{value:,.0f} {unit}"
+    return f"{sign}{value} {unit}"
+
+
+def uc(component: str, value):
+    """Component value with its unit."""
+    return u(value, UNITS.get(component, ""))
+
+
+def ud(component: str, value):
+    """Difference of a component with its difference unit (pp for %, index pts for indices)."""
+    unit = UNITS.get(component, "")
+    return u(value, DIFF_UNITS.get(unit, unit), signed=True)
+
+
 def comp_rows(components: list[dict]) -> list[list]:
-    """[component, raw, percentile (1 decimal), weight, contribution]."""
-    return [[c["component"], c["raw_value"], None if c["percentile"] is None else round(c["percentile"], 1),
-             c["weight"], c["contribution"]] for c in components]
+    """[component, value with unit, percentile (1 decimal), weight, contribution in pts]."""
+    return [[c["component"], uc(c["component"], c["raw_value"]),
+             None if c["percentile"] is None else round(c["percentile"], 1),
+             c["weight"], f"{c['contribution']} pts"] for c in components]
 
 
-COMP_HEADER = ["component", "raw", "pctile", "weight", "contrib"]
+COMP_HEADER = ["component", "value", "pctile", "weight", "contribution"]
+
+UNMET_MEANINGS = {
+    "lf_avg": "12-month average load factor (passengers / seats); higher = fuller flights",
+    "lf_peak": "highest monthly load factor in the window",
+    "growth_yoy": "passenger growth vs the prior 12 months",
+    "delay_rate": "share of arrivals >= 15 min late",
+    "nas_share": "share of delay minutes caused by the airport/airspace system (capacity, ATC)",
+    "completion_gap": "share of US-carrier scheduled departures that were not flown (cancellations); "
+                      "it is independent of load factor",
+}
+INDEPENDENCE_NOTE = ("Each component is scored independently against other airports; components do not cause or "
+                     "explain each other. The score is the sum of the contributions.")
 
 
 def _ft(label: str) -> int:
     """'7L/25R (12,894 ft)' -> 12894 (parsing a label produced by scoring.metrics)."""
     return int(label.rsplit("(", 1)[1].split(" ft")[0].replace(",", ""))
+
+
+def difference_drivers(base: str, other: str, contrib_base: dict, contrib_other: dict,
+                       index_base: float, index_other: float) -> dict:
+    """Rank the component contribution differences (base - other) by size and say whose index each raises."""
+    diffs = {k: round(contrib_base[k] - contrib_other[k], 2) for k in contrib_base}
+    ranked = sorted(diffs.items(), key=lambda kv: -abs(kv[1]))
+    net = round(sum(diffs.values()), 2)
+    higher = base if net > 0 else other
+    parts = ", ".join(f"{k} {v:+.2f} pts" for k, v in ranked)
+    return {
+        "ranked": [f"{k} {v:+.2f} pts (raises {base if v > 0 else other if v < 0 else 'neither'})" for k, v in ranked],
+        "net_difference": f"{net:+.2f} pts",
+        "summary": (f"{higher} has the higher congestion index ({base} {index_base} vs {other} {index_other}). "
+                    f"Contribution differences ({base} minus {other}), largest first: {parts}; net {net:+.2f} pts. "
+                    f"Positive values raise {base}'s index, negative values raise {other}'s. "
+                    f"Largest single driver: {ranked[0][0]} ({ranked[0][1]:+.2f} pts)."),
+    }
 
 
 # ---------------------------------------------------------------- tools
@@ -143,28 +211,33 @@ def get_airport_profile(frames: Frames, airport: str) -> tuple[dict, dict]:
     cong = ranking.congestion_index(frames, [iata])
     p, d, o = prof["data"], dly["data"], ops["data"]
     inv_row = inv["data"]["ranking"][0] if inv["data"]["ranking"] else None
+    n = inv["data"]["ranked_nationally"]
+    pct3 = ("delay_rate_pct", "nas_share_pct", "cancellation_rate_pct")
     data = {
         "airport": iata, "hub": p["hub"], "state": p["state"],
-        "passengers": p["passengers"], "seats": p["seats"], "departures": p["departures"],
-        "load_factor_avg": p["load_factor_avg"], "load_factor_peak": p["load_factor_peak_month"],
-        "peak_month": p["peak_month"], "growth_yoy_pct": p["growth_yoy_pct"],
-        "delay_rate_pct": d["delay_rate_pct"], "nas_share_pct": d["nas_share_pct"],
-        "cancellation_rate_pct": d["cancellation_rate_pct"],
-        "national": d["national"], "hub_peer_median": d["hub_peer_median"],
-        "delay_rate_minus_national_pp": diff(d["delay_rate_pct"], d["national"]["delay_rate_pct"]),
-        "nas_share_minus_national_pp": diff(d["nas_share_pct"], d["national"]["nas_share_pct"]),
-        "delay_rate_minus_peer_median_pp": diff(d["delay_rate_pct"], d["hub_peer_median"]["delay_rate_pct"]),
-        "completion_gap_pct_us_carriers": gap["data"]["completion_gap_pct"],
-        "operations_per_runway": o["operations_per_runway"], "commercial_runways": o["runway_count"],
+        "passengers": u(p["passengers"], "passengers"), "seats": u(p["seats"], "seats"),
+        "departures": u(p["departures"], "departures"),
+        "load_factor_avg": u(p["load_factor_avg"], "LF"), "load_factor_peak": u(p["load_factor_peak_month"], "LF"),
+        "peak_month": p["peak_month"], "growth_yoy": u(p["growth_yoy_pct"], "%"),
+        **{k.replace("_pct", ""): u(d[k], "%") for k in pct3},
+        "national": {k.replace("_pct", ""): u(d["national"][k], "%") for k in pct3},
+        "hub_peer_median": {k.replace("_pct", ""): u(d["hub_peer_median"][k], "%") for k in pct3},
+        "delay_rate_minus_national": u(diff(d["delay_rate_pct"], d["national"]["delay_rate_pct"]), "pp"),
+        "nas_share_minus_national": u(diff(d["nas_share_pct"], d["national"]["nas_share_pct"]), "pp"),
+        "delay_rate_minus_peer_median": u(diff(d["delay_rate_pct"], d["hub_peer_median"]["delay_rate_pct"]), "pp"),
+        "completion_gap_us_carriers": u(gap["data"]["completion_gap_pct"], "%"),
+        "operations_per_runway": u(o["operations_per_runway"], "ops/runway/yr"),
+        "commercial_runways": u(int(o["runway_count"]), "runways"),
         "runway_rule_interpretation": o["interpretation"],
-        "congestion_index": cong["data"]["airports"][0]["congestion_index"],
-        "congestion_national_rank": cong["data"]["airports"][0]["national_rank"],
-        "investment_score": inv_row["investment_score"] if inv_row else None,
-        "investment_national_rank": inv_row["national_rank"] if inv_row else None,
-        "ranked_airports": inv["data"]["ranked_nationally"],
+        "congestion_index": u(cong["data"]["airports"][0]["congestion_index"], "index"),
+        "congestion_national_rank": f"{cong['data']['airports'][0]['national_rank']} of {n}",
+        "investment_score": u(inv_row["investment_score"], "/ 100") if inv_row else None,
+        "investment_national_rank": f"{inv_row['national_rank']} of {n}" if inv_row else None,
         "in_ranking_universe": inv_row is not None,
     }
-    full = merge([prof, dly, gap, ops, inv, cong], data,
+    full = merge([prof, dly, gap, ops, inv, cong],
+                 {"profile": p, "delay": d, "completion_gap": gap["data"], "ops": o,
+                  "investment": inv["data"], "congestion": cong["data"]},
                  f"{prof['data_period']}; operations: {o['period']}")
     return full, data
 
@@ -188,11 +261,13 @@ def rank_airports(frames: Frames, region: str | None = None, states: list[str] |
         raw = {c["component"]: c["raw_value"] for c in r["components"]}
         nxt = rows[i + 1]["investment_score"] if i + 1 < len(rows) else None
         table.append([r["rank"], r["airport"], r["state"], r["hub"], r["investment_score"], r["national_rank"],
-                      raw["demand_pressure"], raw["growth"], raw["congestion"], raw["scale"],
-                      [c["contribution"] for c in r["components"]], diff(r["investment_score"], nxt, 1)])
+                      uc("demand_pressure", raw["demand_pressure"]), uc("growth", raw["growth"]),
+                      uc("congestion", raw["congestion"]), uc("scale", raw["scale"]),
+                      [f"{c['contribution']} pts" for c in r["components"]],
+                      u(diff(r["investment_score"], nxt, 1), "pts")])
     data = {
-        "header": ["rank", "airport", "state", "hub", "score", "natl_rank", "load_factor", "growth_pct",
-                   "congestion_idx", "passengers", "contrib[demand,growth,congestion,scale]", "gap_to_next"],
+        "header": ["rank", "airport", "state", "hub", "score", "natl_rank", "load_factor", "growth",
+                   "congestion", "passengers", "contribution[demand,growth,congestion,scale]", "score_gap_to_next"],
         "rows": table,
         "n_more": max(0, len(rows) - top_n),
         "ranked_nationally": inv["data"]["ranked_nationally"],
@@ -200,19 +275,20 @@ def rank_airports(frames: Frames, region: str | None = None, states: list[str] |
         "outside_ranking_universe": [o["airport"] for o in inv["data"]["outside_ranking_universe"]],
         "stability_top3": stab["data"]["rankings"],
         "stability_same_set": stab["data"]["same_top_n_set"],
+        "interpretation": "score = sum of the four contributions; score_gap_to_next = score minus the next airport's score",
     }
     full = merge([inv, stab], {"ranking": inv["data"], "stability": stab["data"]})
     full["assumptions"] = notes + full["assumptions"]
     return full, data
 
 
-COMPARE_METRICS = [  # (label, unit for differences, getter)
-    ("congestion_index", "index pts", lambda c, p, d, o: c["congestion_index"]),
-    ("delay_rate_pct", "pp", lambda c, p, d, o: d["delay_rate_pct"]),
-    ("nas_share_pct", "pp", lambda c, p, d, o: d["nas_share_pct"]),
-    ("cancellation_rate_pct", "pp", lambda c, p, d, o: d["cancellation_rate_pct"]),
-    ("operations_per_runway", "operations", lambda c, p, d, o: o["operations_per_runway"]),
-    ("commercial_runways", "runways", lambda c, p, d, o: o["runway_count"]),
+COMPARE_METRICS = [  # (label, unit, getter)
+    ("congestion_index", "index", lambda c, p, d, o: c["congestion_index"]),
+    ("delay_rate", "%", lambda c, p, d, o: d["delay_rate_pct"]),
+    ("nas_share", "%", lambda c, p, d, o: d["nas_share_pct"]),
+    ("cancellation_rate", "%", lambda c, p, d, o: d["cancellation_rate_pct"]),
+    ("operations_per_runway", "ops/runway/yr", lambda c, p, d, o: o["operations_per_runway"]),
+    ("commercial_runways", "runways", lambda c, p, d, o: int(o["runway_count"])),
     ("load_factor_avg", "LF", lambda c, p, d, o: p["load_factor_avg"]),
     ("passengers", "passengers", lambda c, p, d, o: p["passengers"]),
 ]
@@ -227,40 +303,40 @@ def compare_congestion(frames: Frames, airports: list[str]) -> tuple[dict, dict]
     profs = [metrics.airport_profile(frames, a) for a in codes]
     dlys = [metrics.delay_profile(frames, a) for a in codes]
     opss = [metrics.ops_per_runway(frames, a) for a in codes]
-    values = {}
-    for label, unit, get in COMPARE_METRICS:
-        values[label] = {a: get(rows[i], profs[i]["data"], dlys[i]["data"], opss[i]["data"]) for i, a in enumerate(codes)}
+    raw = {label: {a: get(rows[i], profs[i]["data"], dlys[i]["data"], opss[i]["data"]) for i, a in enumerate(codes)}
+           for label, _, get in COMPARE_METRICS}
+    units = {label: unit for label, unit, _ in COMPARE_METRICS}
     base = codes[0]
-    differences = {
-        f"{base}_minus_{other}": {label: [diff(values[label][base], values[label][other], 3), unit]
-                                  for label, unit, _ in COMPARE_METRICS}
-        for other in codes[1:]
-    }
-    contrib = {a: {c[0]: c[4] for c in comp_rows(rows[i]["components"])} for i, a in enumerate(codes)}
-    contrib_diff = {f"{base}_minus_{o}": {k: diff(contrib[base][k], contrib[o][k]) for k in contrib[base]}
-                    for o in codes[1:]}
+    contrib = {r["airport"]: {c["component"]: c["contribution"] for c in r["components"]} for r in rows}
+    index = {r["airport"]: r["congestion_index"] for r in rows}
     data = {
         "airports": codes,
         "hubs": {r["airport"]: r["hub"] for r in rows},
-        "national_rank_congestion": {r["airport"]: r["national_rank"] for r in rows},
-        "ranked_airports": rows[0]["ranked_airports"],
-        "values": values,
-        "national": {k: v for k, v in dlys[0]["data"]["national"].items() if k != "arrivals"},
-        "differences": differences,
-        "index_components_header": ["component", "pctile", "weight", "contrib"],
+        "congestion_national_rank": {r["airport"]: f"{r['national_rank']} of {r['ranked_airports']}" for r in rows},
+        "values": {label: {a: u(raw[label][a], units[label]) for a in codes} for label in raw},
+        "national": {k.replace("_pct", ""): u(v, "%") for k, v in dlys[0]["data"]["national"].items() if k != "arrivals"},
+        "differences": {
+            f"{base}_minus_{o}": {label: u(diff(raw[label][base], raw[label][o], 3),
+                                           DIFF_UNITS.get(units[label], units[label]), signed=True) for label in raw}
+            for o in codes[1:]
+        },
+        "index_components_header": ["component", "pctile", "weight", "contribution"],
         "index_components": {r["airport"]: [[c[0], c[2], c[3], c[4]] for c in comp_rows(r["components"])]
                              for r in rows},
-        "contribution_differences": contrib_diff,
+        "drivers_of_index_difference": {
+            f"{base}_vs_{o}": difference_drivers(base, o, contrib[base], contrib[o], index[base], index[o])
+            for o in codes[1:]
+        },
         "runway_lengths_ft_counted": {o["data"]["airport"]: [_ft(x) for x in o["data"]["runways_counted"]] for o in opss},
         "runway_lengths_ft_excluded_short": {o["data"]["airport"]: [_ft(x) for x in o["data"]["runways_excluded_short"]]
                                              for o in opss},
         "interpretation": [
             f"{base}_minus_X > 0 means {base} is higher than X on that metric; < 0 means lower",
-            "Higher percentile / contribution = more congested; the index is the sum of contributions",
+            "To explain why one index is higher, use drivers_of_index_difference (contributions), not raw values",
             *[o["data"]["interpretation"] for o in opss],
         ],
     }
-    full = merge([cong, *profs, *dlys, *opss], data,
+    full = merge([cong, *profs, *dlys, *opss], {"congestion": cong["data"], "raw_values": raw},
                  f"Delay & traffic: {window_label(WINDOW)}; Operations (Socrata): {opss[0]['data']['period']}")
     return full, data
 
@@ -271,51 +347,60 @@ def long_haul_share(frames: Frames, airport: str, threshold_mi: int | None = Non
     d = env["data"]
     key = f"top_routes_at_or_above_{default}_mi"
     data = {
-        "airport": d["airport"], "threshold_mi": default,
-        "departure_share_pct": d["long_haul_departure_share_pct"], "seat_share_pct": d["long_haul_seat_share_pct"],
-        "total_passenger_departures": d["total_passenger_departures"],
-        "sensitivity": [[s["threshold_mi"], s["departure_share_pct"], s["seat_share_pct"]] for s in d["sensitivity"]],
-        "sensitivity_header": ["threshold_mi", "departure_share_pct", "seat_share_pct"],
-        "top_routes": [[r["dest"], r["dest_country"], int(r["distance_mi"]), int(r["departures"]), int(r["seats"])]
-                       for r in d[key]],
-        "top_routes_header": ["dest", "country", "distance_mi", "departures", "seats"],
+        "airport": d["airport"], "threshold": f"{default:,} mi",
+        "departure_share": u(d["long_haul_departure_share_pct"], "%"),
+        "seat_share": u(d["long_haul_seat_share_pct"], "%"),
+        "total_passenger_departures": u(d["total_passenger_departures"], "departures"),
+        "sensitivity": [[f"{s['threshold_mi']:,} mi", u(s["departure_share_pct"], "%"), u(s["seat_share_pct"], "%")]
+                        for s in d["sensitivity"]],
+        "sensitivity_header": ["threshold", "departure_share", "seat_share"],
+        "top_routes": [[r["dest"], r["dest_country"], f"{int(r['distance_mi']):,} mi",
+                        u(int(r["departures"]), "departures"), u(int(r["seats"]), "seats")] for r in d[key]],
+        "top_routes_header": ["dest", "country", "distance", "departures", "seats"],
         "interpretation": "A lower threshold counts more routes as long-haul, so the share rises as the threshold falls",
     }
     return env, data
 
 
 def unmet_demand(frames: Frames, airport: str) -> tuple[dict, dict]:
-    u = ranking.unmet_demand(frames, airport)
-    d = u["data"]
+    um = ranking.unmet_demand(frames, airport)
+    d = um["data"]
     dly = metrics.delay_profile(frames, d["airport"])
     dd = dly["data"]
-    keep = ("current_load_factor", "extra_seats", "extra_seats_pct", "extra_departures")
+
+    def gap_view(g: dict) -> dict:
+        return {"current_load_factor": u(g["current_load_factor"], "LF"), "extra_seats": u(g["extra_seats"], "seats"),
+                "extra_seats_pct": u(g["extra_seats_pct"], "%"),
+                "extra_departures": u(g["extra_departures"], "departures")}
+
     gaps = {
         target: {
-            "window_12_months": {k: entry["window"][k] for k in keep},
-            "peak_month": {"month": entry["peak_month"]["month"], **{k: entry["peak_month"][k] for k in keep}},
+            "window_12_months": gap_view(entry["window"]),
+            "peak_month": {"month": entry["peak_month"]["month"], **gap_view(entry["peak_month"])},
             "interpretation": entry["interpretation"],
         }
         for target, entry in d["capacity_gap"].items()
     }
     data = {
-        "airport": d["airport"], "hub": d["hub"], "unmet_demand_score": d["unmet_demand_score"],
+        "airport": d["airport"], "hub": d["hub"], "unmet_demand_score": u(d["unmet_demand_score"], "/ 100"),
         "components_header": COMP_HEADER, "components": comp_rows(d["components"]),
-        "drivers": [[x["component"], x["value"], x["peer_median"],
-                     diff(x["value"], x["peer_median"], 3), round(x["percentile"], 1)]
-                    for x in d["drivers_above_peer_median"]],
+        "component_meanings": UNMET_MEANINGS,
+        "note": INDEPENDENCE_NOTE,
+        "drivers_above_peer_median": [
+            [x["component"], uc(x["component"], x["value"]), uc(x["component"], x["peer_median"]),
+             ud(x["component"], diff(x["value"], x["peer_median"], 3)), round(x["percentile"], 1)]
+            for x in d["drivers_above_peer_median"]],
         "drivers_header": ["component", "value", "peer_median", "value_minus_median", "pctile"],
         "peer_group": d["peer_group"],
         "vs_national": {
-            "delay_rate_pct": [dd["delay_rate_pct"], dd["national"]["delay_rate_pct"],
-                               diff(dd["delay_rate_pct"], dd["national"]["delay_rate_pct"])],
-            "nas_share_pct": [dd["nas_share_pct"], dd["national"]["nas_share_pct"],
-                              diff(dd["nas_share_pct"], dd["national"]["nas_share_pct"])],
-            "header": ["airport", "national", "difference_pp"],
+            "delay_rate": {"airport": u(dd["delay_rate_pct"], "%"), "national": u(dd["national"]["delay_rate_pct"], "%"),
+                           "difference": u(diff(dd["delay_rate_pct"], dd["national"]["delay_rate_pct"]), "pp")},
+            "nas_share": {"airport": u(dd["nas_share_pct"], "%"), "national": u(dd["national"]["nas_share_pct"], "%"),
+                          "difference": u(diff(dd["nas_share_pct"], dd["national"]["nas_share_pct"]), "pp")},
         },
         "capacity_gap": gaps,
     }
-    return merge([u, dly], {"unmet_demand": d, "delay_profile": dd}), data
+    return merge([um, dly], {"unmet_demand": d, "delay_profile": dd}), data
 
 
 def live_airport_status(frames: Frames, airport: str,

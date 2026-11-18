@@ -130,13 +130,24 @@ class OpenAIChat:
         self.max_output_tokens = max_output_tokens or int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "1000"))
         self.temperature = temperature
 
+    def _update_limit(self, headers) -> None:
+        """Pace to the provider's real per-model limit (Groq: x-ratelimit-limit-tokens), unless set explicitly."""
+        if os.getenv("LLM_TPM_LIMIT"):
+            return
+        try:
+            self.pacer.limit = int(headers.get("x-ratelimit-limit-tokens"))
+        except (TypeError, ValueError, AttributeError):
+            pass
+
     def complete(self, messages: list[dict], tools: list[dict], tool_choice: str = "auto") -> LLMResponse:
         self.pacer.wait_for(estimate_tokens(messages, tools, self.max_output_tokens // 2))
         kwargs = dict(model=self.model, messages=messages, tools=tools, tool_choice=tool_choice,
                       temperature=self.temperature, max_completion_tokens=self.max_output_tokens)
         if self.reasoning_effort:
             kwargs["reasoning_effort"] = self.reasoning_effort
-        resp = with_retry(lambda: self.client.chat.completions.create(**kwargs))
+        raw = with_retry(lambda: self.client.chat.completions.with_raw_response.create(**kwargs))
+        self._update_limit(raw.headers)
+        resp = raw.parse()
         usage = resp.usage
         self.pacer.record(usage.total_tokens if usage else 0)
         msg = resp.choices[0].message
