@@ -124,7 +124,7 @@ All computed per airport over a trailing 12-month window (state the window in ev
 - Keep it simple and readable over clever — the author must explain every line in an interview.
 
 ## Build plan (status)
-- [ ] 1. Environment + repo skeleton
+- [x] 1. Environment + repo skeleton
 - [ ] 2. Data spike: verify each source, record exact endpoints/fields in data/raw/README.md
 - [ ] 3. ETL → DuckDB
 - [ ] 4. Metrics + scoring + tests (the 4 example questions answered via Python only)
