@@ -34,6 +34,12 @@ def _region_ok(args: dict) -> bool:
         set(args.get("states") or []) == {"CT", "ME", "MA", "NH", "RI", "VT"}
 
 
+def _rerank_ok(args: dict) -> bool:
+    """Expected for "Rank them again with growth weighted higher": the SAME region (New England, as in the
+    previous turn) and a growth weight above the default."""
+    return _region_ok(args) and (args.get("weights") or {}).get("growth", 0) > INVESTMENT_WEIGHTS["growth"]
+
+
 def _airports(args: dict) -> set[str]:
     return {a.upper() for a in args.get("airports", [])} | ({args["airport"].upper()} if "airport" in args else set())
 
@@ -43,8 +49,7 @@ SCRIPT = [
     ("Which airports in New England are strong candidates for terminal expansion?",
      {"rank_airports"}, False, _region_ok),
     ("Rank them again with growth weighted higher.",
-     {"rank_airports"}, False,
-     lambda a: _region_ok(a) and (a.get("weights") or {}).get("growth", 0) > INVESTMENT_WEIGHTS["growth"]),
+     {"rank_airports"}, False, _rerank_ok),   # expected: region = new england, growth weight > default
     ("Compare LA (LAX) and Santa Ana (SNA) airport congestion levels.",
      {"compare_congestion"}, False, lambda a: {"LAX", "SNA"} <= {x.upper() for x in a.get("airports", [])}
      or {"LA", "SANTA ANA"} <= {x.upper() for x in a.get("airports", [])}),
@@ -62,6 +67,8 @@ def grade(result, acceptable: set[str], no_tool_ok: bool, check) -> tuple[bool, 
     names = [r.name for r in result.tool_calls]
     if result.error:
         return False, f"error: {result.error}"
+    if result.grounding_issues:
+        return False, f"grounding check failed: {'; '.join(result.grounding_issues)}"
     if not names:
         return no_tool_ok, "no tool (answered from context)" if no_tool_ok else "no tool called"
     wrong = [n for n in names if n not in acceptable]
@@ -94,12 +101,15 @@ def run(effort: str, show_answers: bool) -> dict:
                      "calls": result.llm_calls, "flags": len(result.untraceable_numbers),
                      "untraceable": result.untraceable_numbers, "wait": client.pacer.total_waited - waited_before,
                      "seconds": seconds, "tools": [(r.name, r.args, r.error) for r in result.tool_calls],
-                     "answer": result.text})
+                     "answer": result.text, "grounding": result.grounding_issues,
+                     "retried": result.retried, "models": result.models})
         print(f"\n--- [{i}] {question}")
         for line in summarize_calls(result.tool_calls):
             print(f"    tool: {line}")
         print(f"    tool choice: {'CORRECT' if ok else 'WRONG'} ({why}) | {result.llm_calls} LLM calls | "
               f"{result.total_tokens:,} tokens | {seconds:.1f}s (pacing wait {rows[-1]['wait']:.0f}s)")
+        print(f"    grounding check: {'FAILED ' + '; '.join(result.grounding_issues) if result.grounding_issues else 'passed'}"
+              + (" (after an automatic retry)" if result.retried else ""))
         if result.untraceable_numbers:
             for n in result.untraceable_numbers:
                 print(f"    NUMBER CHECK: untraceable {n['value']!r} in: ...{n['context']}...")
@@ -111,11 +121,14 @@ def run(effort: str, show_answers: bool) -> dict:
     total_tokens = sum(r["tokens"] for r in rows)
     print(f"\nSUMMARY effort={effort}: tool choice {correct}/{len(rows)} correct | total tokens {total_tokens:,} "
           f"(avg {total_tokens // len(rows):,}/turn, max {max(r['tokens'] for r in rows):,}) | "
-          f"untraceable numbers {sum(r['flags'] for r in rows)} | pacing wait {sum(r['wait'] for r in rows):.0f}s")
+          f"untraceable numbers {sum(r['flags'] for r in rows)} | grounding failures "
+          f"{sum(bool(r['grounding']) for r in rows)} | retries {sum(r['retried'] for r in rows)} | "
+          f"pacing wait {sum(r['wait'] for r in rows):.0f}s")
     return {"effort": effort, "model": client.model, "max_output_tokens": client.max_output_tokens,
             "tpm_limit": client.pacer.limit, "reasoning_effort_sent": client.reasoning_effort,
             "correct": correct, "n": len(rows), "tokens": total_tokens,
             "max_turn": max(r["tokens"] for r in rows), "flags": sum(r["flags"] for r in rows),
+            "grounding_failures": sum(bool(r["grounding"]) for r in rows), "retries": sum(r["retried"] for r in rows),
             "wait": sum(r["wait"] for r in rows), "rows": rows}
 
 
@@ -136,22 +149,26 @@ def write_markdown(results: list[dict], path: Path | None = None) -> None:
         "",
         "## Summary",
         "",
-        "| reasoning effort (sent) | tool choice correct | total tokens | avg / turn | max turn | untraceable numbers | pacing wait |",
-        "|---|---|---|---|---|---|---|",
+        "| reasoning effort (sent) | tool choice correct | grounding failures | retries | total tokens | avg / turn "
+        "| max turn | untraceable numbers | pacing wait |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
-        lines.append(f"| {r['reasoning_effort_sent'] or 'n/a (not supported)'} | {r['correct']}/{r['n']} | {r['tokens']:,} | {r['tokens'] // r['n']:,} | "
+        lines.append(f"| {r['reasoning_effort_sent'] or 'n/a (not supported)'} | {r['correct']}/{r['n']} | "
+                     f"{r['grounding_failures']} | {r['retries']} | {r['tokens']:,} | {r['tokens'] // r['n']:,} | "
                      f"{r['max_turn']:,} | {r['flags']} | {r['wait']:.0f} s |")
     for r in results:
         lines += ["", f"## Run: reasoning_effort = {r['reasoning_effort_sent'] or 'n/a'}", "",
-                  "| # | question | tools called | tool choice | LLM calls | tokens | wait | number check |",
-                  "|---|---|---|---|---|---|---|---|"]
+                  "| # | question | tools called | tool choice | grounding | LLM calls | tokens | wait | number check |",
+                  "|---|---|---|---|---|---|---|---|---|"]
         for row in r["rows"]:
             tools = "<br>".join(f"`{n}({json.dumps(a, ensure_ascii=False)})`" + (f" ERROR {e}" if e else "")
                                 for n, a, e in row["tools"]) or "none"
             check = "all traceable" if not row["untraceable"] else ", ".join(u["value"] for u in row["untraceable"])
+            grounding = ("FAILED: " + "; ".join(row["grounding"])) if row["grounding"] else "passed"
+            grounding += " (retried)" if row["retried"] else ""
             lines.append(f"| {row['q']} | {row['question']} | {tools} | {'correct' if row['ok'] else 'WRONG'} "
-                         f"({row['why']}) | {row['calls']} | {row['tokens']:,} | {row['wait']:.0f} s | {check} |")
+                         f"({row['why']}) | {grounding} | {row['calls']} | {row['tokens']:,} | {row['wait']:.0f} s | {check} |")
         lines += ["", "### Answers"]
         for row in r["rows"]:
             lines += ["", f"#### {row['q']}. {row['question']}", ""]

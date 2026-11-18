@@ -100,6 +100,14 @@ def render_assistant(message: dict, show_meta: bool = True) -> None:
         with st.container(border=True):
             st.markdown("**Key facts** · *computed, not AI-generated*")
             st.markdown("\n".join(f"- {f}" for f in facts))
+    if message.get("grounding_issues"):
+        items = "\n".join(f"- {i}" for i in message["grounding_issues"])
+        st.warning("**Grounding check failed:** this answer could not be verified against the tool calls of this "
+                   "turn, even after an automatic retry. Treat it with caution and check the Key facts and "
+                   "Evidence.\n\n" + items)
+    elif message.get("retried"):
+        st.caption("A first draft failed the grounding check; this answer comes from an automatic retry "
+                   "with a tool call.")
     if message.get("untraceable"):
         items = "\n".join(f"- `{n['value']}` in: ...{n['context']}..." for n in message["untraceable"])
         st.warning("**Number check:** these numbers in the answer could not be traced to a tool output. "

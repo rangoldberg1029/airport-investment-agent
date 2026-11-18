@@ -6,6 +6,7 @@ import time
 
 ANALYZING = "Analyzing question..."
 COMPOSING = "Composing answer..."
+RETRYING = "Answer failed the grounding check - retrying with a tool call..."
 
 
 def tool_label(name: str, args: str | dict) -> str:
@@ -45,6 +46,8 @@ class StatusReporter:
             label = COMPOSING if kw.get("after_tools") else ANALYZING
         elif event == "tool_start":
             label = tool_label(kw["name"], kw.get("args", {}))
+        elif event == "retry":
+            label = RETRYING
         elif event == "tool_done":
             if kw.get("error"):
                 self.status.write(f"Tool {kw['name']} returned an error: {kw['error']}")

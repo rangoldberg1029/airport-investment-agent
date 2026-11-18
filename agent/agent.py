@@ -4,6 +4,11 @@ Memory: the last MAX_TEXT_TURNS user/assistant exchanges are resent as text. The
 keeps its full answer and its tool-call/tool-result messages; older answers are truncated to OLD_ANSWER_CHARS
 and their tool messages are dropped (token budget).
 All tool records are kept in the Agent for the UI and for the number check.
+
+Follow-up context: the last successful tool call (name + arguments) is added to every new question, so
+"rank them again", "what about X" or "why is X lower" reuse the same region / airport set.
+Grounding check: every answer is checked deterministically (agent/guardrails.grounding_issues). If it fails,
+the turn is retried once with tool_choice="required"; if it still fails, the issues are returned to the UI.
 """
 
 import copy
@@ -11,10 +16,10 @@ import json
 from dataclasses import dataclass, field
 from typing import Callable
 
-from agent.guardrails import untraceable_numbers
+from agent.guardrails import grounding_issues, untraceable_numbers
 from agent.llm import LLMClient, RateLimited
 from agent.prompts import SYSTEM_PROMPT
-from agent.tools import TOOL_SCHEMAS, ToolCallRecord, execute_tool
+from agent.tools import TOOL_SCHEMAS, TOOLS, ToolCallRecord, execute_tool
 from data.repository import Frames
 
 MAX_TOOL_ROUNDS = 4
@@ -28,6 +33,7 @@ class Turn:
     steps: list[dict] = field(default_factory=list)     # assistant tool-call + tool-result messages
     answer: str = ""
     records: list[ToolCallRecord] = field(default_factory=list)
+    note: str = ""          # extra context appended to the user message for the LLM (never shown in history)
 
 
 @dataclass
@@ -39,6 +45,8 @@ class TurnResult:
     llm_calls: int = 0
     error: str | None = None
     models: list[str] = field(default_factory=list)      # models that answered, in order (primary/fallback)
+    grounding_issues: list[str] = field(default_factory=list)   # non-empty = answer failed the grounding check
+    retried: bool = False                                 # True = first draft failed the check, turn was retried
 
 
 class Agent:
@@ -60,9 +68,27 @@ class Agent:
             if latest:                           # latest completed turn keeps its tool messages
                 msgs.extend(t.steps)
             msgs.append({"role": "assistant", "content": t.answer if latest else truncate(t.answer)})
-        msgs.append({"role": "user", "content": current.user})
+        content = current.user + (f"\n\n{current.note}" if current.note else "")
+        msgs.append({"role": "user", "content": content})
         msgs.extend(current.steps)
         return msgs
+
+    def last_tool_call(self) -> ToolCallRecord | None:
+        """Most recent successful tool call in this conversation (for follow-up questions)."""
+        for t in reversed(self.turns):
+            for r in reversed(t.records):
+                if not r.error:
+                    return r
+        return None
+
+    def followup_context(self) -> str:
+        last = self.last_tool_call()
+        if last is None:
+            return ""
+        return (f"[Context: previous tool call in this conversation: {last.name}"
+                f"({json.dumps(last.args, ensure_ascii=False)}). If this question refers to it (e.g. 'them', "
+                f"'again', 'what about', 'why'), call a tool with the same region/airports and change only what "
+                f"the question asks. Any new ranking, comparison or weight change requires a tool call.]")
 
     def reset(self) -> None:
         self.turns = []
@@ -74,9 +100,29 @@ class Agent:
     # ---------------------------------------------------------------- loop
     def ask(self, text: str, on_event: Callable[..., None] | None = None) -> TurnResult:
         """Answer one user message. `on_event(event, **details)` reports progress to a UI:
-        llm_call(round, after_tools), tool_start(name, args), tool_done(name, error)."""
+        llm_call(round, after_tools), tool_start(name, args), tool_done(name, error), retry(issues)."""
         emit = on_event or (lambda event, **kw: None)
-        turn = Turn(user=text)
+        context = self.followup_context()
+        turn, result = self._attempt(text, context, emit, force_tool=False)
+        if result.grounding_issues and not result.error:
+            emit("retry", issues=result.grounding_issues)
+            note = (context + "\n" if context else "") + (
+                "[Your previous draft was rejected by an automatic check: " + "; ".join(result.grounding_issues)
+                + ". Call the appropriate tool now and answer only from its output.]")
+            first = result
+            turn, result = self._attempt(text, note, emit, force_tool=True)
+            result.retried = True
+            result.total_tokens += first.total_tokens
+            result.llm_calls += first.llm_calls
+            result.models = list(dict.fromkeys(first.models + result.models))
+        if not result.error:
+            self.turns.append(turn)
+        return result
+
+    def _attempt(self, text: str, note: str, emit: Callable[..., None],
+                 force_tool: bool) -> tuple[Turn, TurnResult]:
+        """One attempt at a turn. Not added to history here (a rejected draft must not be remembered)."""
+        turn = Turn(user=text, note=note)
         tokens, calls, models = 0, 0, []
 
         def track(resp) -> None:
@@ -86,7 +132,8 @@ class Agent:
             answer = None
             for round_no in range(self.max_tool_rounds):
                 emit("llm_call", round=round_no, after_tools=bool(turn.records))
-                resp = self.client.complete(self.messages(turn), TOOL_SCHEMAS)
+                choice = "required" if force_tool and round_no == 0 else "auto"
+                resp = self.client.complete(self.messages(turn), TOOL_SCHEMAS, tool_choice=choice)
                 tokens, calls = tokens + resp.total_tokens, calls + 1
                 track(resp)
                 if not resp.tool_calls:
@@ -99,18 +146,22 @@ class Agent:
                 tokens, calls, answer = tokens + resp.total_tokens, calls + 1, resp.content
                 track(resp)
         except RateLimited as exc:
-            return TurnResult(str(exc), turn.records, [], tokens, calls, error="rate_limited", models=models)
+            return turn, TurnResult(str(exc), turn.records, [], tokens, calls, error="rate_limited", models=models)
         except Exception as exc:  # provider/network errors: do not crash the UI
-            return TurnResult(f"Sorry, the language model call failed ({type(exc).__name__}). Please try again.",
-                              turn.records, [], tokens, calls, error=str(exc), models=models)
+            return turn, TurnResult(
+                f"Sorry, the language model call failed ({type(exc).__name__}). Please try again.",
+                turn.records, [], tokens, calls, error=str(exc), models=models)
 
         turn.answer = answer.strip() or "I could not produce an answer. Please rephrase the question."
-        self.turns.append(turn)
         # Both what the scoring layer returned (envelope) and what the LLM actually saw (llm_view: precomputed
         # differences and ranked drivers live only there) count as traceable sources.
-        everything = [x for t in self.turns for r in t.records for x in (r.envelope, r.llm_view)]
-        check = untraceable_numbers(turn.answer, everything, user_text=text)
-        return TurnResult(turn.answer, turn.records, check, tokens, calls, models=models)
+        outputs = [x for t in [*self.turns, turn] for r in t.records for x in (r.envelope, r.llm_view)]
+        numbers = untraceable_numbers(turn.answer, outputs, user_text=text)
+        grounded_text = json.dumps(outputs, ensure_ascii=False) + " " + " ".join(t.user for t in [*self.turns, turn])
+        issues = grounding_issues(turn.answer, text, [r.name for r in turn.records], list(TOOLS),
+                                  grounded_text, set(self.frames.airports["iata"]))
+        return turn, TurnResult(turn.answer, turn.records, numbers, tokens, calls, models=models,
+                                grounding_issues=issues)
 
     def _run_tools(self, turn: Turn, resp, emit: Callable[..., None]) -> None:
         turn.steps.append({

@@ -1,0 +1,100 @@
+
+####################################################################################################
+# reasoning_effort = low   model = openai/gpt-oss-120b
+####################################################################################################
+
+--- [1] Which airports in New England are strong candidates for terminal expansion?
+    tool: rank_airports({"region": "new england", "top_n": 10})
+    tool choice: CORRECT (ok) | 2 LLM calls | 3,077 tokens | 2.3s (pacing wait 0s)
+    grounding check: passed
+    number check: all numbers traceable
+    answer:
+      **Answer** – Boston (BOS), Bradley International (BDL) and Portland‑Maine (PWM) rank highest in New England for terminal‑capacity expansion potential.
+      
+      **Why / drivers**  
+      - BOS: investment score **73.7** (national rank 13) – strongest demand pressure (28.2 pts) and congestion (24.4 pts).  
+      - BDL: score **60.6** (national rank 48) – highest demand contribution (30.2 pts) despite negative growth.  
+      - PWM: score **57.1** (national rank 57) – solid demand (30.7 pts) and growth (12.2 pts) with moderate congestion.
+      
+      **Key assumption** – the ranking uses the default investment‑score weights (demand 35 %, growth 25 %, congestion 25 %, scale 15 %).
+
+--- [2] Rank them again with growth weighted higher.
+    tool: rank_airports({"region": "new england", "top_n": 10, "weights": {"congestion": 0.2, "demand_pressure": 0.2, "growth": 0.5, "scale": 0.1}})
+    tool choice: CORRECT (ok) | 2 LLM calls | 5,356 tokens | 32.0s (pacing wait 30s)
+    grounding check: passed
+    number check: all numbers traceable
+    answer:
+      **Answer** – With growth weighted most heavily, Boston (BOS) stays on top, followed by Portland‑Maine (PWM) and then Hartford‑Bradley (BDL).
+      
+      **Why / drivers**  
+      - BOS: score **60.0** – growth contribution **15.4 pts** (second‑largest) plus strong demand (16.1 pts) and congestion (19.5 pts).  
+      - PWM: score **52.6** – highest growth contribution **24.3 pts**, offset by lower demand (17.5 pts).  
+      - BDL: score **43.6** – modest growth contribution **5.5 pts**, but still ahead of others due to demand (17.3 pts) and congestion (14.7 pts).
+      
+      **Key assumption** – growth percentile weight set to 50 % (demand 20 %, congestion 20 %, scale 10 %).
+
+--- [3] Compare LA (LAX) and Santa Ana (SNA) airport congestion levels.
+    tool: compare_congestion({"airports": ["LAX", "SNA"]})
+    tool choice: CORRECT (ok) | 2 LLM calls | 6,006 tokens | 61.4s (pacing wait 59s)
+    grounding check: passed
+    number check: all numbers traceable
+    answer:
+      **Answer** – LAX’s congestion index (50.7) is slightly higher than SNA’s (50.3), indicating marginally tighter congestion at Los Angeles.
+      
+      **Why / drivers**  
+      - **Congestion index:** LAX +0.4 pts over SNA.  
+      - **Delay rate:** LAX 20.22 % vs SNA 18.7 % (**+1.52 pp**).  
+      - **Operations per runway:** LAX 133,594 ops/runway/yr vs SNA 102,792 ops/runway/yr (**+30,802 ops/runway**).  
+      - **NAS share:** LAX 16.06 % vs SNA 17.74 % (**‑1.68 pp**, the largest driver lowering SNA’s index).  
+      
+      **Key assumption** – Congestion index is a weighted percentile of delay rate, NAS share, operations per runway, and cancellation rate.
+
+--- [4] Why is SNA lower?
+    tool choice: CORRECT (no tool (answered from context)) | 1 LLM calls | 2,927 tokens | 31.4s (pacing wait 29s)
+    grounding check: passed
+    number check: all numbers traceable
+    answer:
+      **Answer** – SNA’s congestion index is lower mainly because its NAS‑share is higher (17.74 % vs LAX 16.06 %), which pulls its percentile down, and its delay rate and operations‑per‑runway are both modestly lower than LAX’s.
+      
+      **Why / drivers**  
+      - **NAS share:** SNA +1.68 pp higher than LAX, the biggest negative contributor (‑4.22 pts) to LAX’s index, thus raising SNA’s relative standing.  
+      - **Delay rate:** SNA’s 18.7 % is 1.52 pp lower than LAX, giving SNA a small advantage.  
+      - **Operations per runway:** SNA’s 102,792 ops/runway/yr is 30,802 ops/runway lower than LAX, reducing its congestion pressure.  
+      - **Cancellation rate:** SNA’s 0.91 % is 0.13 pp lower than LAX, a minor positive factor for SNA.  
+      
+      **Key assumption** – The congestion index aggregates weighted percentiles of delay rate, NAS share, operations per runway, and cancellation rate; a higher NAS share lowers the index, while lower delay and ops per runway raise it.
+
+--- [5] What is the percentage of long-haul flights out of Anchorage (ANC)?
+    tool: long_haul_share({"airport": "ANC"})
+    tool choice: CORRECT (ok) | 2 LLM calls | 4,012 tokens | 30.8s (pacing wait 29s)
+    grounding check: passed
+    number check: all numbers traceable
+    answer:
+      **Answer** – Long‑haul departures from Anchorage (ANC) represent **2.67 %** of total passenger departures (threshold ≥ 3,000 mi).
+      
+      **Why / drivers**  
+      - Departure share = 2.67 % (40,198 total departures).  
+      - Seat share = 5.17 % (shows longer‑haul flights carry a higher proportion of seats).  
+      - Sensitivity: lowering the threshold to 2,500 mi raises the departure share to 9.5 %, confirming the metric’s distance basis.  
+      
+      **Key assumption** – “Long‑haul” is defined as flights ≥ 3,000 statute miles.
+    (rate-limited on [6]; waiting 60 s and retrying once)
+
+--- [6] What is the unmet flight demand at SFO and why?
+    tool choice: WRONG (error: rate_limited) | 0 LLM calls | 0 tokens | 120.5s (pacing wait 60s)
+    grounding check: passed
+    number check: all numbers traceable
+    answer:
+      The free LLM tier is rate-limited right now (about 8K tokens per minute). Please wait about a minute and ask again.
+    (rate-limited on [7]; waiting 60 s and retrying once)
+
+--- [7] What about Boston?
+    tool choice: WRONG (error: rate_limited) | 0 LLM calls | 0 tokens | 60.2s (pacing wait 0s)
+    grounding check: passed
+    number check: all numbers traceable
+    answer:
+      The free LLM tier is rate-limited right now (about 8K tokens per minute). Please wait about a minute and ask again.
+
+SUMMARY effort=low: tool choice 5/7 correct | total tokens 21,378 (avg 3,054/turn, max 6,006) | untraceable numbers 0 | grounding failures 0 | retries 0 | pacing wait 208s
+
+Saved C:\Users\DELL\Desktop\airport-investment-agent\docs\eval\eval_results_gpt-oss-120b.md

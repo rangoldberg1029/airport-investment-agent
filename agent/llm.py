@@ -11,8 +11,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
-FRIENDLY_RATE_LIMIT = ("The free LLM tier is rate-limited right now (about 8K tokens per minute). "
-                       "Please wait about a minute and ask again.")
+FRIENDLY_RATE_LIMIT = ("The LLM provider's rate limit was reached (tokens per minute or per day). "
+                       "Please wait a minute and ask again.")
 
 
 class RateLimited(Exception):

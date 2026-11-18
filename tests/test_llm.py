@@ -32,7 +32,7 @@ def test_retry_exhausted_raises_friendly_rate_limit():
     def fn():
         raise Http429()
 
-    with pytest.raises(RateLimited, match="rate-limited"):
+    with pytest.raises(RateLimited, match="rate limit was reached"):
         with_retry(fn, max_retries=3, sleep=sleeps.append)
     assert len(sleeps) == 3 and all(s >= 2 for s in sleeps)      # backoff 2/4/8 s (+ jitter)
 

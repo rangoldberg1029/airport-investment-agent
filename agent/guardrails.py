@@ -114,3 +114,41 @@ def untraceable_numbers(answer: str, tool_outputs: list, user_text: str = "") ->
         if not _ignored(n, extra) and not _matches(n, allowed):
             flagged.append({"value": n.text, "context": n.context})
     return flagged
+
+
+# ---------------------------------------------------------------- grounding check
+# Catches answers that were not produced from this turn's tool calls (e.g. an invented re-ranking).
+
+CODE_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{3}(?![A-Za-z0-9])")
+# Upper-case words that are also US airport codes or that we print ourselves: never treated as airport mentions.
+NON_AIRPORT_WORDS = {"FAA", "BTS", "NAS", "ATC", "DOT", "USA", "YOY", "CEO", "API", "KPI", "AND", "THE", "FOR", "ANY",
+                     "ALL", "NOT", "TOP", "AVG", "MAX", "MIN", "PCT", "NET", "OPS", "SOC", "DFT"}
+ACTION_RE = re.compile(r"\b(re-?rank\w*|rank\w*|compar\w*|compute\w*|calculat\w*|recalculat\w*|weight\w*)\b", re.I)
+
+
+def airport_codes(text: str, known_codes: set[str]) -> set[str]:
+    """Upper-case 3-letter tokens in text that are known US airport codes (excluding common acronyms)."""
+    return {c for c in CODE_RE.findall(text or "") if c in known_codes and c not in NON_AIRPORT_WORDS}
+
+
+def grounding_issues(answer: str, user_text: str, tools_called_now: list[str], tool_names: list[str],
+                     grounded_text: str, known_codes: set[str]) -> list[str]:
+    """Deterministic checks that the answer is grounded in tool calls. Returns human-readable issues.
+
+    a. every airport code in the answer appears in this conversation's tool outputs or user messages
+       (`grounded_text` = all tool outputs + all user messages so far, as text);
+    b. the answer does not name a tool that was not called in this turn;
+    c. a request to rank / re-rank / compare / compute / change weights has at least one tool call this turn.
+    """
+    issues = []
+    unknown = sorted(airport_codes(answer, known_codes) - set(CODE_RE.findall(grounded_text)))
+    if unknown:
+        issues.append(f"airport codes not found in any tool output or question: {', '.join(unknown)}")
+    lowered = (answer or "").lower()
+    claimed = [t for t in tool_names if t not in tools_called_now
+               and (t in lowered or t.replace("_", " ") in lowered)]
+    if claimed:
+        issues.append(f"answer names tool(s) not called in this turn: {', '.join(claimed)}")
+    if ACTION_RE.search(user_text or "") and not tools_called_now:
+        issues.append("the request asks to rank/compare/compute or change weights, but no tool was called")
+    return issues

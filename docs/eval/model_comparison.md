@@ -45,3 +45,29 @@ Both models have a 8,000 tokens/minute limit on this key (read from the `x-ratel
 
 Limitation of this comparison: one run per model (7 turns each), so differences are indicative, not statistically
 significant.
+
+## Update: after the grounding guardrails (2026-11-18, later run)
+
+A manual test found an invented re-ranking ("Rank them again with growth weighted higher" answered without a
+tool call). Fix: structured follow-up context (previous tool call + args injected into each turn), a
+deterministic grounding check (airport codes grounded, no claimed-but-uncalled tools, rank/compare/weight
+requests need a tool call) and one retry with `tool_choice="required"`.
+
+| | openai/gpt-oss-120b | openai/gpt-oss-20b |
+|---|---|---|
+| Tool choice | 5/5 completed turns correct; turns 6-7 blocked by the provider's **daily** token limit | **7/7** |
+| Grounding check | passed on all completed turns, 0 retries | **passed on all 7 turns, 0 retries** |
+| Untraceable numbers | 0 | 0 |
+| Follow-up "Rank them again with growth weighted higher" | correct tool call (`region=new england`, growth 0.5); answer text skipped HVN/BTV in the order (wrong #3) | correct tool call and correct order (BOS, PWM, HVN); wrong airport name for HVN |
+
+- gpt-oss-120b log: [eval_log_gpt-oss-120b_after_guardrails.txt](eval_log_gpt-oss-120b_after_guardrails.txt)
+  (the full results file above is from the earlier run; a complete re-run was blocked by the daily limit).
+- gpt-oss-20b full results: [eval_results_gpt-oss-20b.md](eval_results_gpt-oss-20b.md).
+
+**Decision:** gpt-oss-20b met the criteria (7/7, grounding passed on every turn) and is enabled as the fallback
+(`LLM_FALLBACK_MODEL=openai/gpt-oss-20b`). Groq's free tier allows **200,000 tokens per day per model**; the
+fallback has its own daily budget, so it also roughly doubles daily capacity.
+
+Remaining limit (documented, not fixed by prompt tuning): both models can still misstate an **order** or an
+airport **name** while every number and code is correct. The checks do not catch this; the Key facts box under
+each answer shows the deterministic ranking.

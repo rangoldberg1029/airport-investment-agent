@@ -37,11 +37,11 @@ class ScriptedLLM:
 
 @pytest.fixture
 def app(monkeypatch, frames):
-    def configure(api_key="test-key", answer="AAA ranks first."):
+    def configure(api_key="test-key", answer="AAA ranks first.", client=None):
         monkeypatch.setattr(setup, "get_api_key", lambda: api_key)
         monkeypatch.setattr(setup, "get_frames", lambda: frames)
         monkeypatch.setattr(setup, "data_info", lambda: {"sources": [], "built": "2026-11-18"})
-        monkeypatch.setattr(setup, "make_client", lambda: ScriptedLLM(answer))
+        monkeypatch.setattr(setup, "make_client", lambda: client or ScriptedLLM(answer))
         cache = AnswerCache()
         monkeypatch.setattr(setup, "get_answer_cache", lambda: cache)
         ScriptedLLM.calls = 0
@@ -113,3 +113,26 @@ def test_follow_up_is_not_cached(app):
     at.sidebar.button(key="example_0").click().run()
     at.sidebar.button(key="example_0").click().run()                      # same text, but now a follow-up
     assert ScriptedLLM.calls == 4 and not at.session_state.messages[-1].get("cached")
+
+
+class InventingLLM:
+    """Never calls a tool and names one it did not call: fails the grounding check twice."""
+
+    model = "fake-model"
+    reasoning_effort = None
+
+    def set_sleep(self, sleep):
+        pass
+
+    def complete(self, messages, tools, tool_choice="auto"):
+        return LLMResponse("SFO falls to rank 3. Used the rank_airports tool.", [], 10)
+
+
+def test_grounding_failure_shows_warning_and_is_not_cached(app):
+    at = app(client=InventingLLM())
+    at.chat_input[0].set_value("Rank them again with growth weighted higher").run()
+    assert not at.exception
+    warning = " ".join(w.value for w in at.warning)
+    assert "Grounding check failed" in warning and "rank_airports" in warning
+    assert at.session_state.messages[-1]["retried"]
+    assert len(setup.get_answer_cache()) == 0

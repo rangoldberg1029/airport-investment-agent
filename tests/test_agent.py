@@ -91,7 +91,7 @@ def test_trimming_drops_old_tool_messages_and_keeps_pairs_valid(frames):
 
 def test_rate_limited_turn_returns_friendly_message(frames):
     result = Agent(FakeLLM([RateLimited(FRIENDLY_RATE_LIMIT)]), frames).ask("hi")
-    assert result.error == "rate_limited" and "rate-limited" in result.text
+    assert result.error == "rate_limited" and "rate limit was reached" in result.text
 
 
 def test_provider_error_does_not_crash(frames):
