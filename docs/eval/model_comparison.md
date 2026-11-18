@@ -43,7 +43,7 @@ quota is used up is skipped for the rest of the session. Without Groq, a 429 is 
   failover and voice.
 - **Model version.** `gemini-3.5-flash-lite` (07-2026) is the latest stable Flash-Lite in Google's models list
   (also listed: 3.1 stable, 3.1 preview, a "latest" alias). The list does not report function-calling support;
-  the evals confirm it (14/14 correct tool calls in two 7-turn runs).
+  the eval confirms it (7/7 correct tool calls, see [eval_results.md](eval_results.md)).
 - **Thinking level `minimal`**, the lowest, gives correct tool choices. No temperature is sent to Gemini 3
   (Google advises keeping its default).
 - **Server errors happen.** Gemini returned HTTP 503 during evaluation runs, which is why a 5xx is retried once

@@ -206,8 +206,8 @@ One line of reasoning per decision. Values live in `scoring/config.py`; change t
   output (`agent/headlines.py`), so rank order, names, which index is higher, shares and scores are always
   correct; the number and grounding checks run on the LLM part.
 - **Fast path for example cards and suggested follow-ups.** The tool and its arguments are known: the tool
-  runs directly, Key facts and Evidence show in ~25-200 ms, then one LLM call writes the bullets. The call is
-  recorded in the conversation like an LLM-chosen one, so follow-ups keep their context.
+  runs directly, Key facts and Evidence show in under 0.25 s, then one LLM call writes the bullets (about 5-10 s
+  in the eval). The call is recorded in the conversation like an LLM-chosen one, so follow-ups keep their context.
 - **Number traceability check across all turns.** Every number in an answer must trace to a tool output
   (envelope or LLM view); follow-ups may cite earlier turns.
 - **Grounding check.** Airport codes must be grounded, the answer must not claim tools that were not called,
