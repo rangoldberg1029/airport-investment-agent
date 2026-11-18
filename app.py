@@ -31,6 +31,15 @@ def ask_later(question: str) -> None:
     """Button callback: queue a question (runs before the rerun, so the page redraws with it already queued)."""
     st.session_state.pending = question
 
+
+def new_conversation() -> None:
+    """Button callback: clear the conversation before the page redraws (so the empty state shows at once)."""
+    st.session_state.messages = []
+    if "agent" in st.session_state:
+        st.session_state.agent.reset()
+    st.session_state.pop("voice_text", None)
+
+
 # ---------------------------------------------------------------- session state
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -38,16 +47,19 @@ if "agent" not in st.session_state and api_key:
     st.session_state.agent = Agent(setup.make_client(), frames)
 st.session_state.setdefault("pending", None)
 
+# Empty state = no conversation yet and nothing queued. The example questions are shown in exactly one place:
+# as cards in the main area on the empty state, otherwise in the sidebar.
+incoming = st.session_state.get("chat_input") or st.session_state.pending
+empty_state = not st.session_state.messages and not incoming
+
 # ---------------------------------------------------------------- sidebar
 with st.sidebar:
-    st.subheader("Example questions")
-    for i, q in enumerate(EXAMPLES):
-        st.button(q, key=f"example_{i}", width="stretch", disabled=not api_key, on_click=ask_later, args=(q,))
-    if st.button("New conversation", key="new_conversation", type="primary", width="stretch"):
-        st.session_state.messages = []
-        if "agent" in st.session_state:
-            st.session_state.agent.reset()
-        st.session_state.pop("voice_text", None)
+    if not empty_state:
+        st.subheader("Example questions")
+        for i, q in enumerate(EXAMPLES):
+            st.button(q, key=f"example_{i}", width="stretch", disabled=not api_key, on_click=ask_later, args=(q,))
+    st.button("New conversation", key="new_conversation", type="primary", width="stretch",
+              on_click=new_conversation)
 
     st.subheader("Ask by voice (beta)")
     if not api_key:
@@ -93,8 +105,7 @@ if not api_key:
 
 # ---------------------------------------------------------------- empty state
 EXAMPLE_TITLES = ["Expansion candidates", "Congestion comparison", "Long-haul share", "Unmet demand"]
-incoming = st.session_state.get("chat_input") or st.session_state.pending
-if not st.session_state.messages and not incoming:
+if empty_state:
     st.markdown("#### Welcome")
     st.markdown("Ask about passenger demand, congestion or expansion candidates at US airports, "
                 "or start with one of these questions:")

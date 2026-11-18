@@ -62,9 +62,25 @@ def test_missing_key_shows_setup_message(app):
     assert at.chat_input[0].disabled
 
 
+def test_examples_shown_in_exactly_one_place(app):
+    at = app()
+    # empty state: main-area cards only, no sidebar list
+    assert sorted(b.key for b in at.button if b.key and b.key.startswith("card_")) == [f"card_{i}" for i in range(4)]
+    assert not [b for b in at.sidebar.button if b.key and b.key.startswith("example_")]
+    at.button(key="card_0").click().run()
+    # conversation started: sidebar list only, no cards
+    assert [b.key for b in at.sidebar.button if b.key and b.key.startswith("example_")] == \
+        [f"example_{i}" for i in range(4)]
+    assert not [b for b in at.button if b.key and b.key.startswith("card_")]
+    # back to the empty state after "New conversation"
+    at.sidebar.button(key="new_conversation").click().run()
+    assert not [b for b in at.sidebar.button if b.key and b.key.startswith("example_")]
+    assert [b for b in at.button if b.key and b.key.startswith("card_")]
+
+
 def test_example_question_renders_answer_key_facts_and_evidence(app):
     at = app()
-    at.sidebar.button(key="example_0").click().run()
+    at.button(key="card_0").click().run()
     assert not at.exception
     text = markdown_text(at)
     assert "Which airports in New England" in text and "AAA ranks first." in text
@@ -82,7 +98,7 @@ def test_typed_question_and_number_check_warning(app):
 
 def test_new_conversation_clears_history(app):
     at = app()
-    at.sidebar.button(key="example_0").click().run()
+    at.button(key="card_0").click().run()
     assert at.session_state.messages
     at.sidebar.button(key="new_conversation").click().run()
     assert at.session_state.messages == []
@@ -90,17 +106,17 @@ def test_new_conversation_clears_history(app):
 
 def test_done_line_shown_once(app):
     at = app()
-    at.sidebar.button(key="example_0").click().run()
+    at.button(key="card_0").click().run()
     assert not [c for c in at.caption if c.value.startswith("Done")]     # only in the status label (live)
 
 
 def test_first_question_cached_across_conversations(app):
     at = app()
-    at.sidebar.button(key="example_0").click().run()
+    at.button(key="card_0").click().run()
     calls_after_first = ScriptedLLM.calls
     assert calls_after_first == 2                                         # tool call + answer
     at.sidebar.button(key="new_conversation").click().run()
-    at.sidebar.button(key="example_0").click().run()
+    at.button(key="card_0").click().run()                                 # empty state again: card
     assert not at.exception
     assert ScriptedLLM.calls == calls_after_first                         # served from cache: no LLM call
     last = at.session_state.messages[-1]
@@ -110,8 +126,8 @@ def test_first_question_cached_across_conversations(app):
 
 def test_follow_up_is_not_cached(app):
     at = app()
-    at.sidebar.button(key="example_0").click().run()
-    at.sidebar.button(key="example_0").click().run()                      # same text, but now a follow-up
+    at.button(key="card_0").click().run()                                 # empty state: card
+    at.sidebar.button(key="example_0").click().run()                      # same text, now a follow-up (sidebar)
     assert ScriptedLLM.calls == 4 and not at.session_state.messages[-1].get("cached")
 
 
