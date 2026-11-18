@@ -1,1 +1,306 @@
-"""Percentile normalization and composite Investment Score."""
+"""Percentile normalisation and composite indices: congestion, unmet demand, investment score.
+
+Every index reports, per component: raw value -> percentile (0-100, vs the ranking universe)
+-> weight -> contribution. Contributions add up to the score.
+"""
+
+import numpy as np
+import pandas as pd
+
+from data.repository import Frames
+from scoring.common import envelope, pct, resolve_airport, resolve_region, rnd, window_label
+from scoring.config import (
+    CONGESTION_WEIGHTS, INVESTMENT_WEIGHTS, LOAD_FACTOR_SENSITIVITY, RANKING_UNIVERSE_HUBS,
+    SOURCE_LABELS, TARGET_LOAD_FACTOR, UNMET_DEMAND_WEIGHTS, WEIGHT_PRESETS, WINDOW,
+)
+from scoring.metrics import (
+    COMPLETION_CAVEAT, DELAY_CAVEAT, NAS_ASSUMPTION, OPS_ASSUMPTION, OPS_CAVEAT, PERIOD, hub_label, kpi_table, socrata_window,
+)
+
+UNIVERSE_TEXT = (f"Percentiles are computed against the ranking universe: FAA "
+                 f"{'/'.join(RANKING_UNIVERSE_HUBS)} hubs (national, before any regional filter)")
+ALL_SOURCES = [SOURCE_LABELS[s] for s in ("t100", "delay", "socrata", "faa", "ourairports")]
+
+
+# ---------------------------------------------------------------- normalisation
+
+def percentile_against(values: pd.Series, reference: pd.Series) -> pd.Series:
+    """Mid-rank percentile (0-100) of each value within the reference distribution.
+
+    p(x) = (count(ref < x) + 0.5 * count(ref == x)) / n * 100. NaN stays NaN.
+    """
+    ref = np.sort(reference.dropna().to_numpy(dtype=float))
+    if len(ref) == 0:
+        return pd.Series(np.nan, index=values.index)
+    v = values.to_numpy(dtype=float)
+    lo = np.searchsorted(ref, v, side="left")
+    hi = np.searchsorted(ref, v, side="right")
+    out = (lo + 0.5 * (hi - lo)) / len(ref) * 100
+    return pd.Series(np.where(np.isnan(v), np.nan, out), index=values.index)
+
+
+def validate_weights(weights: dict | None, defaults: dict) -> tuple[dict, list[str]]:
+    """Merge user overrides into defaults, check keys/signs, renormalise to sum 1."""
+    if not weights:
+        return dict(defaults), []
+    unknown = set(weights) - set(defaults)
+    if unknown:
+        raise ValueError(f"unknown weight(s) {sorted(unknown)}; allowed: {sorted(defaults)}")
+    merged = {**defaults, **{k: float(v) for k, v in weights.items()}}
+    if any(v < 0 for v in merged.values()) or sum(merged.values()) <= 0:
+        raise ValueError("weights must be >= 0 and not all zero")
+    total = sum(merged.values())
+    merged = {k: v / total for k, v in merged.items()}
+    return merged, [f"User-overridden weights (renormalised to sum 1): "
+                    + ", ".join(f"{k} {v:.0%}" for k, v in merged.items())]
+
+
+def weighted_index(pcts: pd.DataFrame, weights: dict) -> tuple[pd.Series, pd.DataFrame, pd.Series]:
+    """Score = sum(weight x percentile) over available components; weights of missing (NaN)
+    components are redistributed. Returns (score, contributions, renormalised_flag)."""
+    w = pd.Series(weights)[pcts.columns]
+    available = pcts.notna()
+    wsum = available.mul(w, axis=1).sum(axis=1)
+    contrib = pcts.fillna(0).mul(w, axis=1).div(wsum.where(wsum > 0), axis=0)
+    score = contrib.sum(axis=1).where(wsum > 0)
+    return score, contrib, wsum < 1 - 1e-9
+
+
+def component_table(raw: pd.DataFrame, pcts: pd.DataFrame, contrib: pd.DataFrame,
+                    weights: dict, airport: str, raw_format: dict) -> list[dict]:
+    rows = []
+    for c in pcts.columns:
+        rows.append({
+            "component": c,
+            "raw_value": raw_format.get(c, rnd)(raw.loc[airport, c]),
+            "percentile": rnd(pcts.loc[airport, c], 1),
+            "weight": weights[c],
+            "contribution": rnd(contrib.loc[airport, c], 2),
+        })
+    return rows
+
+
+def _universe(k: pd.DataFrame) -> pd.DataFrame:
+    return k[k["in_universe"]]
+
+
+RAW_FORMAT = {
+    "delay_rate": pct, "nas_share": pct, "cancellation_rate": pct, "completion_gap": pct,
+    "growth_yoy": pct, "growth": pct, "ops_per_runway": lambda x: rnd(x, 0),
+    "scale": lambda x: rnd(x, 0), "passengers": lambda x: rnd(x, 0),
+}
+RAW_UNITS = ("raw values: rates/shares/growth in %, load factor as a fraction, "
+             "ops_per_runway = annual operations per runway, scale = passengers")
+
+
+# ---------------------------------------------------------------- congestion
+
+def congestion_scores(frames: Frames) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series]:
+    """Congestion index for every airport. Returns (raw, percentiles, contributions, score)."""
+    key = ("congestion", WINDOW)
+    if key not in frames.cache:
+        k = kpi_table(frames)
+        cols = list(CONGESTION_WEIGHTS)
+        raw = k[cols]
+        pcts = pd.DataFrame({c: percentile_against(raw[c], _universe(k)[c]) for c in cols})
+        score, contrib, _ = weighted_index(pcts, CONGESTION_WEIGHTS)
+        frames.cache[key] = (raw, pcts, contrib, score)
+    return frames.cache[key]
+
+
+def congestion_index(frames: Frames, names: list[str]) -> dict:
+    """Congestion index (0-100) and its components for one or more airports (e.g. LAX vs SNA)."""
+    k = kpi_table(frames)
+    raw, pcts, contrib, score = congestion_scores(frames)
+    uni_scores = score[k["in_universe"]].sort_values(ascending=False)
+    assumptions, rows = [], []
+    for name in names:
+        iata, a = resolve_airport(name, frames.airports)
+        if a:
+            assumptions.append(a)
+        rows.append({
+            "airport": iata, "hub": hub_label(k.loc[iata, "hub"]),
+            "congestion_index": rnd(score[iata], 1),
+            "national_rank": int(uni_scores.index.get_loc(iata)) + 1 if iata in uni_scores.index else None,
+            "ranked_airports": len(uni_scores),
+            "components": component_table(raw, pcts, contrib, CONGESTION_WEIGHTS, iata, RAW_FORMAT),
+        })
+    sw = socrata_window(frames.socrata, WINDOW)
+    return envelope(
+        {"airports": rows, "weights": CONGESTION_WEIGHTS, "units": RAW_UNITS},
+        [SOURCE_LABELS[s] for s in ("delay", "socrata", "ourairports", "faa")], PERIOD,
+        assumptions + [
+            "Congestion index = weighted percentiles of delay rate, NAS delay share, operations per runway, "
+            "cancellation rate (weights shown)",
+            UNIVERSE_TEXT, NAS_ASSUMPTION, OPS_ASSUMPTION,
+        ],
+        [DELAY_CAVEAT, OPS_CAVEAT,
+         f"Uses Socrata's latest 12 months ({window_label(sw)}), one month earlier than the standard window",
+         "The index is relative (percentiles), not an absolute capacity measure"],
+    )
+
+
+# ---------------------------------------------------------------- unmet demand
+
+def capacity_gap(passengers: float, seats: float, departures: float, target_lf: float) -> dict:
+    """Extra seats/departures needed so that passengers / seats <= target_lf (demand held fixed)."""
+    needed = passengers / target_lf
+    extra_seats = max(0.0, needed - seats)
+    seats_per_dep = seats / departures if departures else float("nan")
+    return {
+        "target_load_factor": target_lf,
+        "current_load_factor": rnd(passengers / seats if seats else float("nan")),
+        "extra_seats": round(extra_seats),
+        "extra_seats_pct": pct(extra_seats / seats) if seats else None,
+        "extra_departures": round(extra_seats / seats_per_dep) if seats_per_dep == seats_per_dep else None,
+        "avg_seats_per_departure": rnd(seats_per_dep, 1),
+    }
+
+
+def unmet_demand(frames: Frames, name: str) -> dict:
+    """Unmet-demand proxy (0-100), drivers vs FAA hub peers, and a capacity-gap estimate."""
+    iata, a = resolve_airport(name, frames.airports)
+    k = kpi_table(frames)
+    if iata not in k.index:
+        raise ValueError(f"{iata} has no passenger service in T-100 for {window_label(WINDOW)}")
+    r = k.loc[iata]
+    cols = list(UNMET_DEMAND_WEIGHTS)
+    pcts = pd.DataFrame({c: percentile_against(k[c], _universe(k)[c]) for c in cols})
+    score, contrib, renorm = weighted_index(pcts, UNMET_DEMAND_WEIGHTS)
+
+    peers = _universe(k)[_universe(k)["hub"] == r["hub"]]
+    drivers = []
+    for c in cols:
+        med = peers[c].median()
+        if r[c] == r[c] and r[c] > med:
+            fmt = RAW_FORMAT.get(c, rnd)
+            drivers.append({"component": c, "value": fmt(r[c]), "peer_median": fmt(med),
+                            "percentile": rnd(pcts.loc[iata, c], 1)})
+
+    gaps = {}
+    for lf in (TARGET_LOAD_FACTOR, *LOAD_FACTOR_SENSITIVITY):
+        gaps[f"lf_{lf:.2f}"] = {
+            "window": capacity_gap(r["passengers"], r["seats"], r["departures"], lf),
+            f"peak_month_{r['lf_peak_month']}": capacity_gap(r["peak_passengers"], r["peak_seats"],
+                                                             r["peak_departures"], lf),
+        }
+
+    caveats = [
+        "True unmet (spilled) demand is NOT observable in public data; this is a proxy built from "
+        "load factor, growth, delays and cancellations",
+        "Capacity gap assumes passenger demand stays the same when capacity is added, and ignores "
+        "slot, gate, runway and airline-network constraints",
+        DELAY_CAVEAT, COMPLETION_CAVEAT,
+    ]
+    if renorm[iata]:
+        caveats.append("Some components are missing for this airport; their weight was redistributed")
+    return envelope(
+        {
+            "airport": iata, "hub": hub_label(r["hub"]),
+            "unmet_demand_score": rnd(score[iata], 1),
+            "components": component_table(k[cols], pcts, contrib, UNMET_DEMAND_WEIGHTS, iata, RAW_FORMAT),
+            "drivers_above_peer_median": drivers,
+            "peer_group": f"{hub_label(r['hub'])}s in the ranking universe (n={len(peers)})",
+            "capacity_gap": gaps,
+            "units": RAW_UNITS,
+        },
+        ALL_SOURCES[:2] + [SOURCE_LABELS["faa"]], PERIOD,
+        ([a] if a else []) + [
+            f"Capacity gap target load factor = {TARGET_LOAD_FACTOR:.2f} (industry 'effectively full' level); "
+            f"sensitivity at {', '.join(f'{x:.2f}' for x in LOAD_FACTOR_SENSITIVITY)} (large-hub median LF)",
+            "Drivers = components where the airport is above the median of its FAA hub-size peers",
+            UNIVERSE_TEXT,
+        ],
+        caveats,
+    )
+
+
+# ---------------------------------------------------------------- investment score
+
+def investment_table(frames: Frames, weights: dict) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series]:
+    """Investment score for every airport: (raw, percentiles, contributions, score)."""
+    k = kpi_table(frames)
+    _, _, _, cong = congestion_scores(frames)
+    raw = pd.DataFrame({
+        "demand_pressure": k["lf_avg"], "growth": k["growth_yoy"],
+        "congestion": cong, "scale": k["passengers"],
+    })
+    uni = raw[k["in_universe"]]
+    pcts = pd.DataFrame({c: percentile_against(raw[c], uni[c]) for c in raw.columns})
+    score, contrib, _ = weighted_index(pcts, weights)
+    return raw, pcts, contrib, score
+
+
+def _select(k: pd.DataFrame, region: str | None, states, airports) -> tuple[pd.Index, list[str]]:
+    assumptions = []
+    if region:
+        states, a = resolve_region(region)
+        assumptions.append(a)
+    if states:
+        return k.index[k["state"].isin(states)], assumptions
+    if airports:
+        return pd.Index(airports), assumptions
+    return k.index, assumptions
+
+
+def investment_scores(frames: Frames, region: str | None = None, states: list[str] | None = None,
+                      airports: list[str] | None = None, weights: dict | None = None,
+                      top_n: int | None = None) -> dict:
+    """Investment score 0-100 for a region / state list / airport list (default: all ranked airports)."""
+    w, w_assumptions = validate_weights(weights, INVESTMENT_WEIGHTS)
+    k = kpi_table(frames)
+    raw, pcts, contrib, score = investment_table(frames, w)
+    selected, sel_assumptions = _select(k, region, states, airports)
+    national = score[k["in_universe"]].sort_values(ascending=False)
+
+    ranked = [a for a in score.loc[selected].sort_values(ascending=False).index if k.loc[a, "in_universe"]]
+    rows = []
+    for i, a in enumerate(ranked[:top_n] if top_n else ranked, start=1):
+        rows.append({
+            "rank": i, "airport": a, "state": k.loc[a, "state"], "hub": hub_label(k.loc[a, "hub"]),
+            "investment_score": rnd(score[a], 1),
+            "national_rank": int(national.index.get_loc(a)) + 1,
+            "components": component_table(raw, pcts, contrib, w, a, RAW_FORMAT | {"demand_pressure": rnd,
+                                                                                  "congestion": lambda x: rnd(x, 1)}),
+        })
+    outside = [
+        {"airport": a, "state": k.loc[a, "state"], "hub": hub_label(k.loc[a, "hub"]),
+         "passengers": int(k.loc[a, "passengers"])}
+        for a in selected if a in k.index and not k.loc[a, "in_universe"] and k.loc[a, "passengers"] >= 50_000
+    ]
+    return envelope(
+        {"ranking": rows, "ranked_nationally": len(national), "weights": w,
+         "outside_ranking_universe": sorted(outside, key=lambda x: -x["passengers"]),
+         "units": "demand_pressure = load factor; growth in %; congestion = congestion index 0-100; scale = passengers"},
+        ALL_SOURCES, PERIOD,
+        sel_assumptions + w_assumptions + [
+            "Investment score = weighted percentiles of demand pressure (load factor), passenger growth, "
+            "congestion index and scale (passengers)",
+            UNIVERSE_TEXT,
+            "Higher score = stronger demand-vs-capacity case for terminal/capacity investment",
+        ],
+        ["Score is relative (percentiles), not a financial return estimate",
+         "Does not include costs, airport finances, land, regulation or airline strategy",
+         DELAY_CAVEAT],
+    )
+
+
+def rank_stability(frames: Frames, region: str | None = None, states: list[str] | None = None,
+                   top_n: int = 3) -> dict:
+    """Re-rank under each weight preset and report whether the top-N picks change."""
+    k = kpi_table(frames)
+    selected, assumptions = _select(k, region, states, None)
+    selected = [a for a in selected if a in k.index and k.loc[a, "in_universe"]]
+    rankings = {}
+    for name, w in WEIGHT_PRESETS.items():
+        _, _, _, score = investment_table(frames, w)
+        rankings[name] = list(score.loc[selected].sort_values(ascending=False).index[:top_n])
+    sets = {frozenset(v) for v in rankings.values()}
+    orders = {tuple(v) for v in rankings.values()}
+    return envelope(
+        {"top_n": top_n, "rankings": rankings, "presets": WEIGHT_PRESETS,
+         "same_top_n_set": len(sets) == 1, "same_top_n_order": len(orders) == 1},
+        ALL_SOURCES, PERIOD,
+        assumptions + ["Weight presets: balanced (default), demand-led, congestion-led"],
+        ["Stability across presets increases confidence but does not validate the weights themselves"],
+    )

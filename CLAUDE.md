@@ -127,7 +127,7 @@ All computed per airport over a trailing 12-month window (state the window in ev
 - [x] 1. Environment + repo skeleton
 - [x] 2. Data spike: verify each source, record exact endpoints/fields in data/raw/README.md
 - [x] 3. ETL → DuckDB
-- [ ] 4. Metrics + scoring + tests (the 4 example questions answered via Python only)
+- [x] 4. Metrics + scoring + tests (the 4 example questions answered via Python only)
 - [ ] 5. Agent loop + tools
 - [ ] 6. Streamlit chat UI (show tool calls + sources; voice = bonus)
 - [ ] 7. DESIGN.md + README.md

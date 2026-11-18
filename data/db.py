@@ -5,14 +5,15 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
+from scoring.config import WINDOW
+
 DATA_DIR = Path(__file__).resolve().parent
 DB_PATH = DATA_DIR / "airports.duckdb"
 PROCESSED_DIR = DATA_DIR / "processed"
 RAW_DIR = DATA_DIR / "raw"
 
-# Agreed standard trailing-12-month window (scripts/spike/FINDINGS.md), inclusive (year, month).
-WINDOW_START = (2025, 9)
-WINDOW_END = (2026, 8)
+# Standard trailing-12-month window lives in scoring/config.py (single source of truth).
+WINDOW_START, WINDOW_END = WINDOW
 
 
 def write_table(con: duckdb.DuckDBPyConnection, name: str, df: pd.DataFrame) -> None:
