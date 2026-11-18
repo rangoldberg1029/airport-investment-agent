@@ -77,7 +77,23 @@ def test_unmet_demand_drivers_include_difference_to_median(frames):
     d = view(execute_tool("unmet_demand", {"airport": "AAA"}, frames))["data"]
     for comp, value, median, delta, _ in d["drivers"]:
         assert delta == round(value - median, 3)
-    assert {row[0] for row in d["capacity_gap"]} == {0.85, 0.8}
+    assert set(d["capacity_gap"]) == {"target_0.85", "target_0.80"}
+    entry = d["capacity_gap"]["target_0.85"]
+    assert set(entry) == {"window_12_months", "peak_month", "interpretation"}
+    assert entry["peak_month"]["month"] == "2026-07"
+
+
+def test_percentiles_have_one_decimal(frames):
+    d = view(execute_tool("unmet_demand", {"airport": "AAA"}, frames))["data"]
+    pctiles = [row[2] for row in d["components"]] + [row[4] for row in d["drivers"]]
+    assert all(p == round(p, 1) for p in pctiles) and any(p != round(p) for p in pctiles)
+
+
+def test_compare_congestion_states_directions(frames):
+    d = view(execute_tool("compare_congestion", {"airports": ["AAA", "BBB"]}, frames))["data"]
+    text = " ".join(d["interpretation"])
+    assert "AAA_minus_X > 0 means AAA is higher" in text
+    assert "RAISES operations per runway" in text
 
 
 def test_live_status_no_events_is_not_an_error(frames):

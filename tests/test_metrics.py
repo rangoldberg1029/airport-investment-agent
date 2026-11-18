@@ -75,6 +75,11 @@ def test_ops_envelope_lists_counted_and_excluded_runways(frames):
     assert env["data_period"].startswith("Operations (Socrata):")
 
 
+def test_ops_interpretation_states_direction():
+    assert "RAISES operations per runway" in metrics.ops_interpretation("SNA", 1)
+    assert "no runways excluded" in metrics.ops_interpretation("LAX", 0)
+
+
 def test_missing_delay_data_stays_nan(frames):
     frames.delay = frames.delay[frames.delay["airport"] != "BBB"]
     k = metrics.kpi_table(frames)

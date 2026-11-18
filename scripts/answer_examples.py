@@ -149,10 +149,13 @@ def q4(frames) -> None:
         print(f"    {label:<26}{dd[key]:>8}{dd['national'][key]:>10}{dd['hub_peer_median'][key]:>16}")
     print(f"    (national = {dd['national']['arrivals']:,.0f} reporting-carrier arrivals at all airports)")
     print("\n  Capacity gap estimate (extra seats needed to reach the target load factor):")
-    for target, parts in d["capacity_gap"].items():
-        for period, g in parts.items():
-            print(f"    target {g['target_load_factor']:.2f} | {period:<20} current LF {g['current_load_factor']:.3f}"
+    for target, entry in d["capacity_gap"].items():
+        for period in ("window", "peak_month"):
+            g = entry[period]
+            label = "12-month window" if period == "window" else f"peak month {g['month']}"
+            print(f"    target {g['target_load_factor']:.2f} | {label:<20} current LF {g['current_load_factor']:.3f}"
                   f" -> +{g['extra_seats']:,} seats ({g['extra_seats_pct']}%), ~{g['extra_departures']:,} departures")
+        print(f"      -> {entry['interpretation']}")
     footer(u, dp)
 
 

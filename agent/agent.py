@@ -1,7 +1,8 @@
 """Agent loop: the LLM picks tools, tools compute, the LLM explains. No framework.
 
-Memory: the last MAX_TEXT_TURNS user/assistant exchanges are resent as text; tool-call and tool-result
-messages are resent only for the most recent completed turn and the current one (token budget).
+Memory: the last MAX_TEXT_TURNS user/assistant exchanges are resent as text. The most recent completed turn
+keeps its full answer and its tool-call/tool-result messages; older answers are truncated to OLD_ANSWER_CHARS
+and their tool messages are dropped (token budget).
 All tool records are kept in the Agent for the UI and for the number check.
 """
 
@@ -16,6 +17,7 @@ from data.repository import Frames
 
 MAX_TOOL_ROUNDS = 4
 MAX_TEXT_TURNS = 6
+OLD_ANSWER_CHARS = 300      # answers older than the latest completed turn are truncated (token budget)
 
 
 @dataclass
@@ -50,10 +52,11 @@ class Agent:
         msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
         history = self.turns[-MAX_TEXT_TURNS:]
         for i, t in enumerate(history):
+            latest = i == len(history) - 1
             msgs.append({"role": "user", "content": t.user})
-            if i == len(history) - 1:            # latest completed turn keeps its tool messages
+            if latest:                           # latest completed turn keeps its tool messages
                 msgs.extend(t.steps)
-            msgs.append({"role": "assistant", "content": t.answer})
+            msgs.append({"role": "assistant", "content": t.answer if latest else truncate(t.answer)})
         msgs.append({"role": "user", "content": current.user})
         msgs.extend(current.steps)
         return msgs
@@ -99,6 +102,10 @@ class Agent:
             record = execute_tool(call.name, call.arguments, self.frames, self.tool_overrides)
             turn.records.append(record)
             turn.steps.append({"role": "tool", "tool_call_id": call.id, "content": record.llm_view})
+
+
+def truncate(text: str, limit: int = OLD_ANSWER_CHARS) -> str:
+    return text if len(text) <= limit else text[:limit].rstrip() + " [...]"
 
 
 def summarize_calls(records: list[ToolCallRecord]) -> list[str]:

@@ -115,7 +115,7 @@ def estimate_tokens(messages: list[dict], tools: list[dict], max_output: int) ->
 class OpenAIChat:
     def __init__(self, api_key: str | None = None, base_url: str | None = None, model: str | None = None,
                  reasoning_effort: str | None = None, tpm_limit: int | None = None,
-                 max_output_tokens: int = 1200, temperature: float = 0.2):
+                 max_output_tokens: int | None = None, temperature: float = 0.2):
         from openai import OpenAI
 
         self.model = model or os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
@@ -125,7 +125,10 @@ class OpenAIChat:
         effort = reasoning_effort or os.getenv("LLM_REASONING_EFFORT", "low")
         self.reasoning_effort = effort if "gpt-oss" in self.model else None
         self.pacer = TpmPacer(limit=tpm_limit or int(os.getenv("LLM_TPM_LIMIT", "8000")))
-        self.max_output_tokens, self.temperature = max_output_tokens, temperature
+        # Cap per LLM call. For gpt-oss it includes hidden reasoning tokens: answers in the eval were
+        # <= ~600 tokens, reasoning at effort "low" ~100-300, so 1,000 leaves headroom.
+        self.max_output_tokens = max_output_tokens or int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "1000"))
+        self.temperature = temperature
 
     def complete(self, messages: list[dict], tools: list[dict], tool_choice: str = "auto") -> LLMResponse:
         self.pacer.wait_for(estimate_tokens(messages, tools, self.max_output_tokens // 2))

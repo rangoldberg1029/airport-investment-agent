@@ -48,6 +48,15 @@ def test_capacity_gap_by_hand():
     assert ranking.capacity_gap(700, 1000, 10, 0.8)["extra_seats"] == 0     # already below target
 
 
+def test_capacity_gap_interpretation_branches():
+    zero = {"extra_seats": 0, "current_load_factor": 0.817}
+    peak = {"extra_seats": 67382, "current_load_factor": 0.87}
+    assert "means the average LF (0.817) is below the target" in         ranking.capacity_gap_interpretation(0.85, zero, peak, "2026-06")
+    assert "no seat shortage" in ranking.capacity_gap_interpretation(0.9, zero, {**zero, "current_load_factor": 0.85}, "x")
+    above = {"extra_seats": 5, "current_load_factor": 0.817}
+    assert "above target 0.80" in ranking.capacity_gap_interpretation(0.80, above, peak, "2026-06")
+
+
 # ---------------------------------------------------------------- indices on the fixture
 
 def test_congestion_index_components_add_up(frames):
@@ -65,7 +74,8 @@ def test_unmet_demand_drivers_are_above_hub_median(frames):
     assert "nas_share" not in names                      # identical for all airports -> not above median
     for x in d["drivers_above_peer_median"]:
         assert x["value"] > x["peer_median"]
-    assert set(d["capacity_gap"]) == {"lf_0.85", "lf_0.80"}
+    assert set(d["capacity_gap"]) == {"target_0.85", "target_0.80"}
+    assert {"window", "peak_month", "interpretation"} == set(d["capacity_gap"]["target_0.85"])
 
 
 def test_investment_scores_rank_only_universe_and_list_others(frames):

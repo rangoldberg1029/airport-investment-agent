@@ -266,6 +266,14 @@ def long_haul_share(frames: Frames, name: str, thresholds=LONG_HAUL_THRESHOLDS_M
     )
 
 
+def ops_interpretation(iata: str, n_excluded: int) -> str:
+    """Direction of the runway rule's effect, stated explicitly so the LLM does not have to infer it."""
+    if n_excluded:
+        return (f"{iata}: {n_excluded} short runway(s) (< {MIN_COMMERCIAL_RUNWAY_FT:,} ft) excluded; this RAISES "
+                f"operations per runway compared with counting all open runways")
+    return f"{iata}: no runways excluded; all open runways are >= {MIN_COMMERCIAL_RUNWAY_FT:,} ft"
+
+
 def ops_per_runway(frames: Frames, name: str) -> dict:
     r, assumptions = _row(frames, name)
     sw = socrata_window(frames.socrata, WINDOW)
@@ -276,7 +284,8 @@ def ops_per_runway(frames: Frames, name: str) -> dict:
     data = {"airport": r.name, "operations_per_runway": rnd(r["ops_per_runway"], 0),
             "runway_count": r["runway_count"], "all_carrier_departures": r["socrata_departures"],
             "runways_counted": fmt(counted), "runways_excluded_short": fmt(excluded),
-            "period": window_label(sw)}
+            "period": window_label(sw),
+            "interpretation": ops_interpretation(r.name, len(excluded))}
     return envelope(
         data, [SOURCE_LABELS["socrata"], SOURCE_LABELS["ourairports"]],
         f"Operations (Socrata): {window_label(sw)}",

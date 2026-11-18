@@ -158,6 +158,19 @@ def capacity_gap(passengers: float, seats: float, departures: float, target_lf: 
     }
 
 
+def capacity_gap_interpretation(target: float, window: dict, peak: dict, peak_month: str) -> str:
+    """Plain-language reading of a capacity-gap result (deterministic, so the LLM does not infer it)."""
+    if window["extra_seats"] == 0 and peak["extra_seats"] == 0:
+        return (f"0 at target {target:.2f}: both the 12-month average LF ({window['current_load_factor']}) and the "
+                f"peak month LF ({peak['current_load_factor']}) are at or below the target; no seat shortage by this measure")
+    if window["extra_seats"] == 0:
+        return (f"0 for the 12-month window at target {target:.2f} means the average LF ({window['current_load_factor']}) "
+                f"is below the target; the shortage appears only in the peak month {peak_month} "
+                f"(LF {peak['current_load_factor']}). Delay-based pressure is shown separately in the components")
+    return (f"The 12-month average LF ({window['current_load_factor']}) is above target {target:.2f}: "
+            f"extra seats are needed across the year, more so in the peak month {peak_month}")
+
+
 def unmet_demand(frames: Frames, name: str) -> dict:
     """Unmet-demand proxy (0-100), drivers vs FAA hub peers, and a capacity-gap estimate."""
     iata, a = resolve_airport(name, frames.airports)
@@ -180,10 +193,12 @@ def unmet_demand(frames: Frames, name: str) -> dict:
 
     gaps = {}
     for lf in (TARGET_LOAD_FACTOR, *LOAD_FACTOR_SENSITIVITY):
-        gaps[f"lf_{lf:.2f}"] = {
-            "window": capacity_gap(r["passengers"], r["seats"], r["departures"], lf),
-            f"peak_month_{r['lf_peak_month']}": capacity_gap(r["peak_passengers"], r["peak_seats"],
-                                                             r["peak_departures"], lf),
+        window = capacity_gap(r["passengers"], r["seats"], r["departures"], lf)
+        peak = capacity_gap(r["peak_passengers"], r["peak_seats"], r["peak_departures"], lf)
+        gaps[f"target_{lf:.2f}"] = {
+            "window": window,
+            "peak_month": {"month": r["lf_peak_month"], **peak},
+            "interpretation": capacity_gap_interpretation(lf, window, peak, r["lf_peak_month"]),
         }
 
     caveats = [

@@ -2,7 +2,7 @@
 
 import json
 
-from agent.agent import MAX_TEXT_TURNS, Agent
+from agent.agent import MAX_TEXT_TURNS, OLD_ANSWER_CHARS, Agent
 from agent.llm import FRIENDLY_RATE_LIMIT, LLMResponse, RateLimited, ToolCall
 
 
@@ -110,3 +110,15 @@ def test_number_check_uses_earlier_turns(frames):
     agent = Agent(fake, frames)
     agent.ask("long haul?")
     assert agent.ask("repeat?").untraceable_numbers == []
+
+
+def test_older_answers_truncated_latest_kept_in_full(frames):
+    long_answer = "x" * (OLD_ANSWER_CHARS + 200)
+    fake = FakeLLM([text("A " + long_answer), text("B " + long_answer), text("C")])
+    agent = Agent(fake, frames)
+    agent.ask("first")
+    agent.ask("second")
+    agent.ask("third")
+    assistant = [m["content"] for m in fake.seen[-1] if m["role"] == "assistant"]
+    assert assistant[0].startswith("A ") and assistant[0].endswith("[...]") and len(assistant[0]) < OLD_ANSWER_CHARS + 10
+    assert assistant[1] == "B " + long_answer                               # latest completed turn: full text

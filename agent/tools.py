@@ -118,8 +118,8 @@ def compact(env: dict, view_data: dict) -> str:
 
 
 def comp_rows(components: list[dict]) -> list[list]:
-    """[component, raw, percentile, weight, contribution] with integer percentiles."""
-    return [[c["component"], c["raw_value"], None if c["percentile"] is None else round(c["percentile"]),
+    """[component, raw, percentile (1 decimal), weight, contribution]."""
+    return [[c["component"], c["raw_value"], None if c["percentile"] is None else round(c["percentile"], 1),
              c["weight"], c["contribution"]] for c in components]
 
 
@@ -156,6 +156,7 @@ def get_airport_profile(frames: Frames, airport: str) -> tuple[dict, dict]:
         "delay_rate_minus_peer_median_pp": diff(d["delay_rate_pct"], d["hub_peer_median"]["delay_rate_pct"]),
         "completion_gap_pct_us_carriers": gap["data"]["completion_gap_pct"],
         "operations_per_runway": o["operations_per_runway"], "commercial_runways": o["runway_count"],
+        "runway_rule_interpretation": o["interpretation"],
         "congestion_index": cong["data"]["airports"][0]["congestion_index"],
         "congestion_national_rank": cong["data"]["airports"][0]["national_rank"],
         "investment_score": inv_row["investment_score"] if inv_row else None,
@@ -253,6 +254,11 @@ def compare_congestion(frames: Frames, airports: list[str]) -> tuple[dict, dict]
         "runway_lengths_ft_counted": {o["data"]["airport"]: [_ft(x) for x in o["data"]["runways_counted"]] for o in opss},
         "runway_lengths_ft_excluded_short": {o["data"]["airport"]: [_ft(x) for x in o["data"]["runways_excluded_short"]]
                                              for o in opss},
+        "interpretation": [
+            f"{base}_minus_X > 0 means {base} is higher than X on that metric; < 0 means lower",
+            "Higher percentile / contribution = more congested; the index is the sum of contributions",
+            *[o["data"]["interpretation"] for o in opss],
+        ],
     }
     full = merge([cong, *profs, *dlys, *opss], data,
                  f"Delay & traffic: {window_label(WINDOW)}; Operations (Socrata): {opss[0]['data']['period']}")
@@ -273,6 +279,7 @@ def long_haul_share(frames: Frames, airport: str, threshold_mi: int | None = Non
         "top_routes": [[r["dest"], r["dest_country"], int(r["distance_mi"]), int(r["departures"]), int(r["seats"])]
                        for r in d[key]],
         "top_routes_header": ["dest", "country", "distance_mi", "departures", "seats"],
+        "interpretation": "A lower threshold counts more routes as long-haul, so the share rises as the threshold falls",
     }
     return env, data
 
@@ -282,16 +289,20 @@ def unmet_demand(frames: Frames, airport: str) -> tuple[dict, dict]:
     d = u["data"]
     dly = metrics.delay_profile(frames, d["airport"])
     dd = dly["data"]
-    gaps = []
-    for target, parts in d["capacity_gap"].items():
-        for period, g in parts.items():
-            gaps.append([g["target_load_factor"], period, g["current_load_factor"], g["extra_seats"],
-                         g["extra_seats_pct"], g["extra_departures"]])
+    keep = ("current_load_factor", "extra_seats", "extra_seats_pct", "extra_departures")
+    gaps = {
+        target: {
+            "window_12_months": {k: entry["window"][k] for k in keep},
+            "peak_month": {"month": entry["peak_month"]["month"], **{k: entry["peak_month"][k] for k in keep}},
+            "interpretation": entry["interpretation"],
+        }
+        for target, entry in d["capacity_gap"].items()
+    }
     data = {
         "airport": d["airport"], "hub": d["hub"], "unmet_demand_score": d["unmet_demand_score"],
         "components_header": COMP_HEADER, "components": comp_rows(d["components"]),
         "drivers": [[x["component"], x["value"], x["peer_median"],
-                     diff(x["value"], x["peer_median"], 3), round(x["percentile"])]
+                     diff(x["value"], x["peer_median"], 3), round(x["percentile"], 1)]
                     for x in d["drivers_above_peer_median"]],
         "drivers_header": ["component", "value", "peer_median", "value_minus_median", "pctile"],
         "peer_group": d["peer_group"],
@@ -302,7 +313,6 @@ def unmet_demand(frames: Frames, airport: str) -> tuple[dict, dict]:
                               diff(dd["nas_share_pct"], dd["national"]["nas_share_pct"])],
             "header": ["airport", "national", "difference_pp"],
         },
-        "capacity_gap_header": ["target_lf", "period", "current_lf", "extra_seats", "extra_seats_pct", "extra_departures"],
         "capacity_gap": gaps,
     }
     return merge([u, dly], {"unmet_demand": d, "delay_profile": dd}), data
