@@ -287,10 +287,10 @@ def investment_scores(frames: Frames, region: str | None = None, states: list[st
 
 
 def rank_stability(frames: Frames, region: str | None = None, states: list[str] | None = None,
-                   top_n: int = 3) -> dict:
+                   top_n: int = 3, airports: list[str] | None = None) -> dict:
     """Re-rank under each weight preset and report whether the top-N picks change."""
     k = kpi_table(frames)
-    selected, assumptions = _select(k, region, states, None)
+    selected, assumptions = _select(k, region, states, airports)
     selected = [a for a in selected if a in k.index and k.loc[a, "in_universe"]]
     rankings = {}
     for name, w in WEIGHT_PRESETS.items():
