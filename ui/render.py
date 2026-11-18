@@ -8,6 +8,7 @@ from datetime import date
 
 import streamlit as st
 
+from agent.headlines import BULLET_RE
 from agent.llm import DEFAULT_GEMINI_MODEL, DEFAULT_GROQ_MODEL
 from agent.tools import ToolCallRecord, _source_inventory
 from data.repository import Frames
@@ -194,10 +195,20 @@ SPINNER_HTML = (
     "@keyframes aia-spin{to{transform:rotate(360deg)}}</style>")
 
 
+def has_bullets(text: str) -> bool:
+    return any(BULLET_RE.match(line) for line in (text or "").splitlines())
+
+
+def why_section(headline: str, explanation: str) -> str:
+    """Explanation under the Answer line; the "Why / drivers" label only when there are bullets (a refusal or
+    plain reply is shown without it)."""
+    return ("**Why / drivers**\n" if headline and has_bullets(explanation) else "") + (explanation or "")
+
+
 def why_markdown(message: dict) -> str:
     """The Why / drivers part of a stored answer (or its plain reply / error note)."""
     if message.get("headline") and not message.get("error"):
-        return "**Why / drivers**\n" + (message.get("explanation") or "")
+        return why_section(message["headline"], message.get("explanation") or "")
     return message.get("explanation") or (message.get("text") if not message.get("headline") else "")
 
 
@@ -253,7 +264,7 @@ class LiveAnswer:
 
     def token(self, piece: str) -> None:
         self.text += piece
-        self.frame.why.markdown(("**Why / drivers**\n" if self.headline else "") + self.text + " ▌")
+        self.frame.why.markdown(why_section(self.headline, self.text) + " ▌")
 
     def on_event(self, event: str, **kw) -> None:
         if event == "facts_ready":
@@ -286,9 +297,7 @@ def render_checks(message: dict) -> None:
         st.warning("**Grounding check failed:** this answer could not be verified against the tool calls of this "
                    "turn, even after an automatic retry. Treat it with caution and check the Key facts and "
                    "Evidence.\n\n" + items)
-    elif message.get("retried"):
-        st.caption("A first draft failed the grounding check; this answer comes from an automatic retry "
-                   "with a tool call.")
+    # A corrected first draft is noted in the Done line ("auto-verified (1 correction)"), not in the answer.
     if message.get("untraceable"):
         items = "\n".join(f"- `{n['value']}` in: ...{n['context']}..." for n in message["untraceable"])
         st.warning("**Number check:** these numbers in the answer could not be traced to a tool output. "

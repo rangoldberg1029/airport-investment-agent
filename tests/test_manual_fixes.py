@@ -399,3 +399,33 @@ def test_eval_refusal_grading():
     assert not grade_refusal(_Result("BOS will cost $2 billion. I can show its profile."), ("BOS",))[0]
     invented = _Result(good.text, untraceable=[{"value": "$2 billion", "context": ""}])
     assert grade_refusal(invented, ("BOS",)) == (False, "invented numbers: $2 billion")
+
+
+# ---------------------------------------------------------------- display: verification note, scope wording
+
+def test_corrected_draft_is_noted_in_the_done_line_not_the_answer(app):
+    from ui.progress import done_line
+    at, _ = app(_Client(["- Used the unmet_demand tool.", "- CCC leads."]))      # first draft fails, retry passes
+    at.button(key="card_0").click().run()
+    message = at.session_state.messages[-1]
+    assert message["retried"] and message["meta"].endswith(" · auto-verified (1 correction)")
+    assert not [c for c in at.caption if "first draft" in c.value]
+    clean = type("R", (), {"tool_calls": [], "models": [], "total_tokens": 0, "retried": False,
+                           "grounding_issues": [], "fallback_reason": None})()
+    assert "auto-verified" not in done_line(clean, 1, "m")
+
+
+def test_out_of_scope_key_fact_wording(frames):
+    record = execute_tool("unmet_demand", {"airport": "LHR"}, frames)
+    assert key_facts([record]) == [f"Out of scope: {record.error}"]
+    other = execute_tool("unmet_demand", {"airport": "Atlantis"}, frames)
+    assert key_facts([other])[0].startswith("Tool unmet_demand returned an error")
+
+
+def test_why_label_only_when_there_are_bullets():
+    from ui.render import why_markdown
+    refusal = {"headline": "LHR London Heathrow Airport is outside the US scope.",
+               "explanation": "Heathrow is out of scope. JFK is in scope - I can show its profile."}
+    assert "Why / drivers" not in why_markdown(refusal)
+    bullets = {"headline": "Top 3 ...", "explanation": "- CCC leads.\n- AAA second."}
+    assert why_markdown(bullets).startswith("**Why / drivers**\n- CCC leads.")

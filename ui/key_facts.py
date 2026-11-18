@@ -156,7 +156,8 @@ def key_facts(records: list[ToolCallRecord]) -> list[str]:
     out = []
     for r in records:
         if r.error:
-            out.append(f"Tool {r.name} returned an error: {r.error}")
+            out.append(f"Out of scope: {r.error}" if r.meta.get("out_of_scope")
+                       else f"Tool {r.name} returned an error: {r.error}")
             continue
         fn = FACTS.get(r.name)
         if fn is None:

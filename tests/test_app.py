@@ -111,7 +111,7 @@ def test_example_question_renders_answer_key_facts_and_evidence(app):
     text = markdown_text(at)
     assert "Which airports in New England" in text and "AAA ranks first." in text
     assert "**Answer** - Top " in text and "New England candidates" in text      # computed headline
-    assert "**Why / drivers**" in text
+    assert "**Why / drivers**" not in text          # the fake answer has no bullets: no label
     assert "Key facts" in text and "investment score" in text
     assert ScriptedLLM.calls == 1                                                # fast path: one LLM call
     last = at.session_state.messages[-1]

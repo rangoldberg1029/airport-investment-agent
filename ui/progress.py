@@ -30,12 +30,16 @@ def tool_label(name: str, args: str | dict) -> str:
 
 def done_line(result, seconds: float, primary: str) -> str:
     """Status label after a turn; names the model(s) that answered, e.g. 'Done · 1 tool call · 2,682 tokens · 3s ·
-    gpt-oss-120b (failover: gemini server error (HTTP 503), after 1 retry)'. `result` is an agent TurnResult."""
+    gpt-oss-120b (failover: gemini server error (HTTP 503), after 1 retry) · auto-verified (1 correction)'.
+    The last part appears when a first draft was corrected by the automatic grounding retry. `result` is an
+    agent TurnResult."""
     n = len(result.tool_calls)
     why = f": {result.fallback_reason}" if result.fallback_reason else ""
     names = [m.split("/")[-1] + (f" (failover{why})" if m != primary else "") for m in result.models]
+    corrected = getattr(result, "retried", False) and not getattr(result, "grounding_issues", None)
     return (f"Done · {n} tool call{'s' if n != 1 else ''} · {result.total_tokens:,} tokens · {seconds:.0f}s"
-            + (f" · {' + '.join(names)}" if names else ""))
+            + (f" · {' + '.join(names)}" if names else "")
+            + (" · auto-verified (1 correction)" if corrected else ""))
 
 
 def wait_message(seconds_left: int) -> str:
