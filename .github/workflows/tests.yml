@@ -11,12 +11,18 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.14: what Streamlit Community Cloud runs; 3.12: the documented minimum for local use.
+        python-version: ["3.12", "3.14"]
+    name: tests (Python ${{ matrix.python-version }})
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install dependencies

@@ -27,7 +27,7 @@ scoring.
 
 ## Quickstart
 
-Requires Python 3.11+.
+Requires Python 3.12 or newer (tested on 3.12 and 3.14).
 
 ```bash
 git clone https://github.com/rangoldberg1029/airport-investment-agent.git
@@ -57,7 +57,8 @@ seconds, no network needed). For a deployment, put the same keys in Streamlit se
 
 ## Deploy (Streamlit Community Cloud)
 
-Create an app from this repository with `app.py` as the entry point and Python 3.12. In the app's
+Create an app from this repository with `app.py` as the entry point (the pinned requirements work on the
+Python 3.14 runtime the platform uses, and on 3.12). In the app's
 **Secrets**, add `GEMINI_API_KEY` (required) and optionally `GROQ_API_KEY`, as in
 `.streamlit/secrets.toml.example`. The database builds automatically on first start.
 
