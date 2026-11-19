@@ -6,7 +6,7 @@ A chat agent that helps investment analysts find US airports where terminal and 
 likely to pay off, by comparing passenger demand with capacity, using public aviation data and deterministic
 scoring.
 
-**Live demo:** _link added at deployment_
+**Live demo:** https://airport-investment-agent-rg.streamlit.app/
 
 | Home | Ranking answer | Evidence |
 |---|---|---|
