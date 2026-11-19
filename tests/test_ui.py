@@ -86,8 +86,11 @@ def live_record(frames):
         return [{"airportId": "AAA", "groundStop": {"impactingCondition": "wind",
                                                     "programExpirationTime": "2026-11-18T20:00:00Z"},
                  "airportConfig": {"arrivalRunwayConfig": "28L (.308)", "arrivalRate": 36}}], "stamp"
+    from datetime import date
+    today = date(2026, 11, 18)                       # fixed "today": the event time is shown without a date
     return execute_tool("live_airport_status", {"airport": "AAA"}, frames,
-                        {"live_airport_status": lambda f, airport: live_airport_status(f, airport, fetch=feed)})
+                        {"live_airport_status": lambda f, airport: live_airport_status(f, airport, fetch=feed,
+                                                                                       today=today)})
 
 
 def test_evidence_tables_and_charts_have_no_code_names(records, live_record):
